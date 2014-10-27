@@ -52,6 +52,8 @@
 #include "cfg.h"
 #include "iobuf.h"
 #include "coio.h"
+#include "bsync.h"
+#include "authentication.h"
 
 static void process_ro(struct request *request, struct port *port);
 box_process_func box_process = process_ro;
@@ -61,6 +63,8 @@ struct recovery_state *recovery;
 static struct evio_service binary; /* iproto binary listener */
 
 int snapshot_pid = 0; /* snapshot processes pid */
+char *current_uri = NULL;
+
 static void
 process_ro(struct request *request, struct port *port)
 {
@@ -87,6 +91,8 @@ recover_row(struct recovery_state *r, void *param, struct xrow_header *row)
 	(void) param;
 	(void) r;
 	assert(r == recovery);
+	if (row->bodycnt == 0 && (row->commit_sn || row->rollback_sn))
+		return;
 	assert(row->bodycnt == 1); /* always 1 for read */
 	struct request request;
 	request_create(&request, row->type);
@@ -158,17 +164,20 @@ extern "C" void
 box_set_replication_source(const char *source)
 {
 	box_check_uri(source, "replication_source");
-	bool old_is_replica = recovery->remote.reader;
+	if (recovery->bsync_remote)
+		tnt_raise(ClientError, ER_CFG, "replication_source",
+			  "cant switch from sync replication to async");
+	bool old_is_replica = recovery->remote[0].reader;
 	bool new_is_replica = source != NULL;
-
 	if (old_is_replica != new_is_replica ||
 	    (old_is_replica &&
-	     (strcmp(source, recovery->remote.source) != 0))) {
+	     (strcmp(source, recovery->remote[0].source) != 0))) {
 
 		if (recovery->finalize) {
 			if (old_is_replica)
 				recovery_stop_remote(recovery);
-			recovery_set_remote(recovery, source);
+			recovery_reset_remote(recovery);
+			recovery_add_remote(recovery, source);
 			if (recovery_has_remote(recovery))
 				recovery_follow_remote(recovery);
 		} else {
@@ -187,12 +196,26 @@ box_set_replication_source(const char *source)
 extern "C" void
 box_set_listen(const char *uri)
 {
-	box_check_uri(uri, "listen");
+/*	if (current_uri == uri || (uri != NULL &&
+				current_uri != NULL &&
+				strcmp(uri, current_uri) == 0))
+		return;
+*/	box_check_uri(uri, "listen");
 	if (evio_service_is_active(&binary))
 		evio_service_stop(&binary);
 
-	if (uri != NULL)
+	if (uri != NULL) {
 		coio_service_start(&binary, uri);
+	}
+	if (current_uri)
+		free(current_uri);
+	if (uri) {
+		int len = strlen(uri);
+		current_uri = (char *)malloc(len + 1);
+		strcpy(current_uri, uri);
+	} else {
+		current_uri = NULL;
+	}
 }
 
 extern "C" void
@@ -296,6 +319,46 @@ boxk(enum iproto_type type, uint32_t space_id, const char *format, ...)
 	process_rw(&req, &null_port);
 }
 
+void
+box_authenticate(const char *user_name, uint32_t len,
+		 const char *tuple, const char */* tuple_end */)
+{
+	uint32_t scramble_len = 0;
+	const char *scramble = xrow_decode_scramble(&tuple, &scramble_len);
+	if (recovery->finalize) {
+		authenticate(user_name, len, scramble, scramble_len);
+		return;
+	}
+	char name_buf[BOX_NAME_MAX + 1];
+	/* \0 - to correctly print user name the error message. */
+	snprintf(name_buf, sizeof(name_buf), "%.*s", len, user_name);
+	int user_id = 0;
+	for (; user_id < recovery->remote_size; ++user_id) {
+		if (recovery->remote[user_id].uri.login_len != len)
+			continue;
+		if (memcmp(user_name, recovery->remote[user_id].uri.login, len))
+			continue;
+		break;
+	}
+	if (user_id == recovery->remote_size)
+		tnt_raise(ClientError, ER_NO_SUCH_USER, name_buf);
+	struct remote *r = &recovery->remote[user_id];
+	if (scramble == NULL && r->uri.password_len == 0)
+		return;
+	if (scramble_len != SCRAMBLE_SIZE)
+		tnt_raise(ClientError, ER_INVALID_MSGPACK,
+			  "invalid scramble size");
+	char local_scramble[SCRAMBLE_SIZE];
+	struct session *session = current_session();
+	scramble_prepare(local_scramble, current_session()->salt,
+			 r->uri.password, r->uri.password_len);
+	if (memcmp(local_scramble, scramble, SCRAMBLE_SIZE))
+		tnt_raise(ClientError, ER_PASSWORD_MISMATCH, name_buf);
+
+	credentials_init(&session->credentials, admin_user);
+	session->credentials.universal_access = 0xFF;
+}
+
 /**
  * @brief Called when recovery/replication wants to add a new server
  * to cluster.
@@ -303,7 +366,7 @@ boxk(enum iproto_type type, uint32_t space_id, const char *format, ...)
  * space and actually adds the server to the cluster.
  * @param server_uuid
  */
-static void
+void
 box_on_cluster_join(const tt_uuid *server_uuid)
 {
 	/** Find the largest existing server id. */
@@ -322,7 +385,7 @@ box_on_cluster_join(const tt_uuid *server_uuid)
 	     (unsigned) server_id, tt_uuid_str(server_uuid));
 }
 
-void
+bool
 box_process_join(int fd, struct xrow_header *header)
 {
 	/* Check permissions */
@@ -332,11 +395,20 @@ box_process_join(int fd, struct xrow_header *header)
 	assert(header->type == IPROTO_JOIN);
 	struct tt_uuid server_uuid = uuid_nil;
 	xrow_decode_join(header, &server_uuid);
-
+	if (tt_uuid_is_equal(&server_uuid, &recovery->server_uuid)) {
+		tnt_raise(ClientError, ER_SERVER_ID_IS_LOCAL);
+	}
 	/* Process JOIN request via replication relay */
-	replication_join(fd, header);
-	/** Register the server with the cluster. */
-	box_on_cluster_join(&server_uuid);
+	if (recovery->bsync_remote) {
+		if (bsync_process_join(fd, &server_uuid)) {
+			replication_join(fd, header);
+			return true;
+		}
+	} else {
+		replication_join(fd, header);
+		box_on_cluster_join(&server_uuid);
+	}
+	return false;
 }
 
 void
@@ -346,15 +418,16 @@ box_process_subscribe(int fd, struct xrow_header *header)
 	access_check_universe(PRIV_R);
 
 	/* process SUBSCRIBE request via replication relay */
-	replication_subscribe(fd, header);
+	replication_subscribe(recovery, fd, header, recovery->server_uuid);
 }
 
 /** Replace the current server id in _cluster */
 static void
-box_set_server_uuid()
+box_set_server_uuid(bool create)
 {
 	struct recovery_state *r = recovery;
-	tt_uuid_create(&r->server_uuid);
+	if (create)
+		tt_uuid_create(&r->server_uuid);
 	assert(r->server_id == 0);
 	if (vclock_has(&r->vclock, 1))
 		vclock_del_server(&r->vclock, 1);
@@ -387,7 +460,7 @@ box_free(void)
 	user_cache_free();
 	schema_free();
 	tuple_free();
-	recovery_exit(recovery);
+	bsync_writer_stop(recovery);
 	recovery = NULL;
 	engine_shutdown();
 	stat_free();
@@ -420,6 +493,7 @@ box_init(void)
 		   cfg_geti("slab_alloc_minimal"),
 		   cfg_geti("slab_alloc_maximal"),
 		   cfg_getd("slab_alloc_factor"));
+	bool is_iproto_init = false;
 
 	stat_init();
 	stat_base = stat_register(iproto_type_strs, IPROTO_TYPE_STAT_MAX);
@@ -441,12 +515,22 @@ box_init(void)
 	recovery = recovery_new(cfg_gets("snap_dir"),
 				cfg_gets("wal_dir"),
 				recover_row, NULL);
-	recovery_set_remote(recovery,
+	recovery_add_remote(recovery,
 			    cfg_gets("replication_source"));
 	recovery_setup_panic(recovery,
 			     cfg_geti("panic_on_snap_error"),
 			     cfg_geti("panic_on_wal_error"));
-
+	recovery->bsync_remote = cfg_geti("replication.bsync");
+	int source_len = cfg_getarr_size("replication.source");
+	for (int i = 0; i < source_len; ++i) {
+		recovery_add_remote(recovery,
+			cfg_getarr_elem("replication.source", i));
+	}
+	bsync_init(recovery);
+	if (recovery->remote_size > 1 && !recovery->bsync_remote) {
+		tnt_raise(ClientError, ER_CFG,
+			"cant execute many JOIN commands");
+	}
 	if (recovery_has_data(recovery)) {
 		/* Tell Sophia engine LSN it must recover to. */
 		int64_t checkpoint_id =
@@ -454,15 +538,23 @@ box_init(void)
 		engine_recover_to_checkpoint(checkpoint_id);
 	} else if (recovery_has_remote(recovery)) {
 		/* Initialize a new replica */
+		tt_uuid_create(&recovery->server_uuid);
 		engine_begin_join();
-		replica_bootstrap(recovery);
-		int64_t checkpoint_id = vclock_signature(&recovery->vclock);
-		engine_checkpoint(checkpoint_id);
+		if (recovery->bsync_remote) {
+			iproto_init(&binary, &recovery->server_uuid);
+			box_set_listen(cfg_gets("listen"));
+			is_iproto_init = true;
+		}
+		if (replica_bootstrap(recovery)) {
+			int64_t checkpoint_id = vclock_signature(&recovery->vclock);
+			engine_checkpoint(checkpoint_id);
+			xdir_scan(&recovery->snap_dir);
+		}
 	} else {
 		/* Initialize the first server of a new cluster */
 		recovery_bootstrap(recovery);
 		box_set_cluster_uuid();
-		box_set_server_uuid();
+		box_set_server_uuid(true);
 		int64_t checkpoint_id = vclock_signature(&recovery->vclock);
 		engine_checkpoint(checkpoint_id);
 	}
@@ -473,9 +565,9 @@ box_init(void)
 			      cfg_getd("wal_dir_rescan_delay"));
 	title("hot_standby", NULL);
 
-	iproto_init(&binary);
+	if (!is_iproto_init)
+		iproto_init(&binary, &recovery->server_uuid);
 	box_set_listen(cfg_gets("listen"));
-
 	int rows_per_wal = box_check_rows_per_wal(cfg_geti("rows_per_wal"));
 	enum wal_mode wal_mode = box_check_wal_mode(cfg_gets("wal_mode"));
 	recovery_finalize(recovery, wal_mode, rows_per_wal);
@@ -493,6 +585,47 @@ box_init(void)
 	say_info("ready to accept requests");
 
 	fiber_gc();
+}
+
+static const char* box_initial_call = "make_scheme";
+static void
+box_call_initial()
+{
+	struct request request;
+	struct iobuf *buf = iobuf_new("initial");
+	int len = strlen(box_initial_call);
+	char *key = (char *)region_alloc(&fiber()->gc, len + 4);
+	request.key_end = mp_encode_str(key, box_initial_call, len);
+	request.key = key;
+	char *tuple = (char *)region_alloc(&fiber()->gc, 16);
+	request.tuple_end = mp_encode_array(tuple, 0);
+	request.tuple = tuple;
+	request.header = (struct xrow_header *)
+		region_alloc0(&fiber()->gc, sizeof(struct xrow_header));
+	try {
+		box_lua_call(&request, &buf->out);
+	} catch (ClientError *e) {
+		if (e->errcode() != ER_NO_SUCH_PROC)
+			throw;
+	}
+	iobuf_reset(buf);
+}
+
+void
+box_generate_initial_snapshot(void *data __attribute__((unused)))
+{
+	box_set_ro(false);
+	tt_uuid local_uuid = recovery->server_uuid;
+	tt_uuid_clear(&recovery->server_uuid);
+	recovery_bootstrap(recovery);
+	recovery->server_uuid = local_uuid;
+	box_set_cluster_uuid();
+	box_set_server_uuid(false);
+	box_call_initial();
+	box_set_ro(true);
+	fiber_yield();
+	box_snapshot();
+	xdir_scan(&recovery->snap_dir);
 }
 
 void

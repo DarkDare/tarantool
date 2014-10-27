@@ -131,7 +131,7 @@ xdir_index_file(struct xdir *dir, int64_t signature)
 	struct xlog *wal;
 
 	try {
-		wal = xlog_open(dir, signature);
+		wal = xlog_open(dir, signature, false);
 		/*
 		 * All log files in a directory must satisfy Lamport's
 		 * eventual order: events in each log file must be
@@ -345,7 +345,7 @@ format_filename(struct xdir *dir, int64_t signature,
  * @retval 1 EOF
  */
 static int
-row_reader(FILE *f, struct xrow_header *row)
+row_reader(FILE *f, struct xrow_header *row, struct region *gc)
 {
 	const char *data;
 
@@ -393,7 +393,7 @@ error:
 	(void) crc32p;
 
 	/* Allocate memory for body */
-	char *bodybuf = (char *) region_alloc(&fiber()->gc, len);
+	char *bodybuf = (char *) region_alloc(gc, len);
 
 	/* Read header and body */
 	if (fread(bodybuf, len, 1, f) != 1)
@@ -485,7 +485,8 @@ xlog_cursor_close(struct xlog_cursor *i)
  * @retval 1    EOF
  */
 int
-xlog_cursor_next(struct xlog_cursor *i, struct xrow_header *row)
+xlog_cursor_next(struct xlog_cursor *i, struct xrow_header *row,
+		 struct region *gc)
 {
 	struct xlog *l = i->log;
 	log_magic_t magic;
@@ -527,7 +528,7 @@ restart:
 	say_debug("magic found at 0x%08jx", (uintmax_t)marker_offset);
 
 	try {
-		if (row_reader(l->f, row) != 0)
+		if (row_reader(l->f, row, gc) != 0)
 			goto eof;
 	} catch (ClientError *e) {
 		if (l->dir->panic_if_error)
@@ -772,7 +773,8 @@ xlog_read_meta(struct xlog *l, int64_t signature)
 }
 
 struct xlog *
-xlog_open_stream(struct xdir *dir, int64_t signature, FILE *file, const char *filename)
+xlog_open_stream(struct xdir *dir, int64_t signature, FILE *file,
+		 const char *filename, bool snap)
 {
 	/*
 	 * Check fopen() result the caller first thing, to
@@ -801,15 +803,16 @@ xlog_open_stream(struct xdir *dir, int64_t signature, FILE *file, const char *fi
 	xlog_read_meta(l, signature);
 
 	log_guard.is_active = false;
+	l->snap = snap;
 	return l;
 }
 
 struct xlog *
-xlog_open(struct xdir *dir, int64_t signature)
+xlog_open(struct xdir *dir, int64_t signature, bool snap)
 {
 	const char *filename = format_filename(dir, signature, NONE);
 	FILE *f = fopen(filename, "r");
-	return xlog_open_stream(dir, signature, f, filename);
+	return xlog_open_stream(dir, signature, f, filename, snap);
 }
 
 /**

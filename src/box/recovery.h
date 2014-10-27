@@ -38,6 +38,11 @@
 #include "vclock.h"
 #include "tt_uuid.h"
 #include "uri.h"
+#include "replica.h"
+#include "fiber.h"
+#include "tt_pthread.h"
+#include "xrow.h"
+#include "small/region.h"
 
 #if defined(__cplusplus)
 extern "C" {
@@ -54,8 +59,34 @@ typedef void (apply_row_f)(struct recovery_state *, void *,
  * LSN makes it to disk.
  */
 
-struct wal_writer;
+struct wal_write_request;
 struct wal_watcher;
+
+/* Context of the WAL writer thread. */
+STAILQ_HEAD(wal_fifo, wal_write_request);
+#define MAX_UNCOMMITED_ROWS 1024
+
+struct wal_writer
+{
+	struct wal_fifo input;
+	struct wal_fifo commit;
+	struct cord cord;
+	pthread_mutex_t mutex;
+	pthread_cond_t cond;
+	ev_async write_event;
+	int rows_per_wal;
+	struct fio_batch *batch;
+	bool is_shutdown;
+	bool is_rollback;
+	ev_loop *txn_loop;
+	struct vclock vclock;
+	bool is_started;
+
+	uint64_t commit_lsn[MAX_UNCOMMITED_ROWS];
+	uint32_t commit_server_id[MAX_UNCOMMITED_ROWS];
+	uint32_t commit_begin;
+	uint32_t commit_end;
+};
 
 enum wal_mode { WAL_NONE = 0, WAL_WRITE, WAL_FSYNC, WAL_MODE_MAX };
 
@@ -67,9 +98,17 @@ enum { REMOTE_SOURCE_MAXLEN = 1024 }; /* enough to fit URI with passwords */
 /** State of a replication connection to the master */
 struct remote {
 	struct fiber *reader;
+	struct fiber *writer;
+	struct fiber *connecter;
+	struct ev_io in;
+	struct ev_io out;
 	const char *status;
 	ev_tstamp lag, last_row_time;
+	tt_uuid server_uuid;
 	bool warning_said;
+	bool connected;
+	bool switched;
+	bool localhost;
 	char source[REMOTE_SOURCE_MAXLEN];
 	struct uri uri;
 	union {
@@ -77,6 +116,14 @@ struct remote {
 		struct sockaddr_storage addrstorage;
 	};
 	socklen_t addr_len;
+};
+
+struct xrow_queue {
+	struct xrow_header queue[MAX_UNCOMMITED_ROWS];
+	struct region queue_gc[MAX_UNCOMMITED_ROWS];
+	bool queue_gc_init[MAX_UNCOMMITED_ROWS];
+	size_t begin;
+	size_t end;
 };
 
 struct recovery_state {
@@ -94,7 +141,10 @@ struct recovery_state {
 	 * locally or send to the replica.
 	 */
 	struct fiber *watcher;
-	struct remote remote;
+	bool join;
+	struct remote remote[VCLOCK_MAX];
+	bool bsync_remote;
+	size_t remote_size;
 	/**
 	 * apply_row is a module callback invoked during initial
 	 * recovery and when reading rows from the master.
@@ -107,6 +157,7 @@ struct recovery_state {
 	uint32_t server_id;
 
 	bool finalize;
+	xrow_queue commit;
 };
 
 struct recovery_state *
@@ -141,10 +192,11 @@ void recovery_follow_local(struct recovery_state *r,
 			   ev_tstamp wal_dir_rescan_delay);
 void recovery_stop_local(struct recovery_state *r);
 
-void recovery_finalize(struct recovery_state *r, enum wal_mode mode,
-		       int rows_per_wal);
+void recovery_finalize(struct recovery_state *r, enum wal_mode wal_mode,
+			int rows_per_wal);
 
-int64_t wal_write(struct recovery_state *r, struct xrow_header *packet);
+void wal_fill_lsn(struct recovery_state *r, struct xrow_header *row);
+int64_t wal_write(struct recovery_state *r, struct xrow_header *row);
 
 void recovery_setup_panic(struct recovery_state *r, bool on_snap_error, bool on_wal_error);
 void recovery_apply_row(struct recovery_state *r, struct xrow_header *packet);

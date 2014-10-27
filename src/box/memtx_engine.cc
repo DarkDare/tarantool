@@ -269,7 +269,7 @@ recover_snap(struct recovery_state *r)
 		tnt_raise(ClientError, ER_MISSING_SNAPSHOT);
 	int64_t signature = vclock_signature(res);
 
-	struct xlog *snap = xlog_open(&r->snap_dir, signature);
+	struct xlog *snap = xlog_open(&r->snap_dir, signature, true);
 	auto guard = make_scoped_guard([=]{
 		xlog_close(snap);
 	});
@@ -281,6 +281,7 @@ recover_snap(struct recovery_state *r)
 
 	say_info("recovering from `%s'", snap->filename);
 	recover_xlog(r, snap);
+	assert(r->commit.begin == r->commit.end);
 }
 
 /** Called at start to tell memtx to recover to a given LSN. */

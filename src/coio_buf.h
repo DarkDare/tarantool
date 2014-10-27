@@ -67,7 +67,7 @@ static inline ssize_t
 coio_breadn(struct ev_io *coio, struct ibuf *buf, size_t sz)
 {
 	ibuf_reserve(buf, sz);
-	ssize_t n = coio_readn_ahead(coio, buf->end, sz, ibuf_unused(buf));
+	ssize_t n = coio_readn_ahead(coio, buf->end, sz, sz);
 	buf->end += n;
 	return n;
 }
@@ -82,8 +82,7 @@ coio_breadn_timeout(struct ev_io *coio, struct ibuf *buf, size_t sz,
 		    ev_tstamp timeout)
 {
 	ibuf_reserve(buf, sz);
-	ssize_t n = coio_readn_ahead_timeout(coio, buf->end, sz, ibuf_unused(buf),
-			                     timeout);
+	ssize_t n = coio_readn_ahead_timeout(coio, buf->end, sz, sz, timeout);
 	buf->end += n;
 	return n;
 }

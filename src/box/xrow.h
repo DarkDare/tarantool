@@ -48,10 +48,24 @@ struct xrow_header {
 	uint64_t sync;
 	uint64_t lsn;
 	double tm;
+	uint64_t commit_sn;
+	uint64_t rollback_sn;
 
 	int bodycnt;
 	struct iovec body[XROW_BODY_IOVMAX];
 };
+
+const char *
+xrow_encode_greeting(const char *salt, const struct tt_uuid *local_uuid);
+
+void
+xrow_decode_greeting(const char *pos, char *salt, struct tt_uuid *uuid);
+
+const char *
+xrow_decode_scramble(const char **pos, uint32_t *scramble_len);
+
+void
+xrow_copy(const struct xrow_header *src, struct xrow_header *dst);
 
 void
 xrow_header_decode(struct xrow_header *header,
@@ -88,7 +102,7 @@ xrow_decode_error(struct xrow_header *row);
  * \param password_len - length of \a password
 */
 void
-xrow_encode_auth(struct xrow_header *row, const char *greeting,
+xrow_encode_auth(struct xrow_header *row, const void *salt,
 		 const char *login, size_t login_len,
 		 const char *password, size_t password_len);
 

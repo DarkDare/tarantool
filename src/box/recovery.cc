@@ -49,6 +49,8 @@
 #include "vclock.h"
 #include "session.h"
 #include "coio.h"
+#include "box.h"
+#include "bsync.h"
 
 /*
  * Recovery subsystem
@@ -116,8 +118,8 @@ const char *wal_mode_STRS[] = { "none", "write", "fsync", NULL };
 
 /* {{{ LSN API */
 
-static void
-fill_lsn(struct recovery_state *r, struct xrow_header *row)
+void
+wal_fill_lsn(struct recovery_state *r, struct xrow_header *row)
 {
 	if (row->server_id == 0) {
 		/* Local request. */
@@ -164,7 +166,9 @@ recovery_new(const char *snap_dirname, const char *wal_dirname,
 	auto guard = make_scoped_guard([=]{
 		free(r);
 	});
-
+	r->join = false;
+	r->commit.begin = r->commit.end = 0;
+	memset(r->commit.queue_gc_init, 0, sizeof(r->commit.queue_gc_init));
 	recovery_update_mode(r, WAL_NONE);
 
 	r->apply_row = apply_row;
@@ -257,13 +261,72 @@ void
 recovery_apply_row(struct recovery_state *r, struct xrow_header *row)
 {
 	/* Check lsn */
-	int64_t current_lsn = vclock_get(&r->vclock, row->server_id);
-	assert(current_lsn >= 0);
-	if (row->lsn > current_lsn)
+	if (row->bodycnt > 0) {
+		int64_t current_lsn = vclock_get(&r->vclock, row->server_id);
+		if (current_lsn < 0 && r != recovery)
+			current_lsn = 0;
+		assert(current_lsn >= 0);
+		if (row->lsn > current_lsn)
+			r->apply_row(r, r->apply_row_param, row);
+	} else if (row->server_id > 0) {
+		assert(row->commit_sn > 0 || row->rollback_sn > 0);
 		r->apply_row(r, r->apply_row_param, row);
+	}
 }
 
 #define LOG_EOF 0
+
+static void
+recovery_commit_rows(struct recovery_state *r, uint64_t sign, bool panic)
+{
+	while (vclock_signature(&r->vclock) < sign) {
+		struct xrow_header *row = &r->commit.queue[r->commit.begin];
+		try {
+			recovery_apply_row(r, row);
+			region_reset(&r->commit.queue_gc[r->commit.begin]);
+		} catch (ClientError *e) {
+			if (panic)
+				throw;
+			say_error("can't apply row: ");
+			e->log();
+			if (row->commit_sn) {
+				vclock_follow(&r->vclock, row->server_id, row->lsn);
+			}
+			region_reset(&r->commit.queue_gc[r->commit.begin]);
+		}
+		assert(r->commit.end != r->commit.begin);
+		if (++r->commit.begin == MAX_UNCOMMITED_ROWS)
+			r->commit.begin = 0;
+	}
+}
+
+static void
+recovery_rollback_row(struct recovery_state *r)
+{
+	region_reset(&r->commit.queue_gc[r->commit.begin]);
+	if (++r->commit.begin == MAX_UNCOMMITED_ROWS)
+		r->commit.begin = 0;
+}
+
+static void
+recovery_rollback_end(struct recovery_state *r)
+{
+	while (r->commit.begin != r->commit.end)
+		recovery_rollback_row(r);
+}
+
+static void
+recovery_rollback_rows(struct recovery_state *r, uint64_t sign)
+{
+	struct vclock vclock_local;
+	vclock_copy(&vclock_local, &r->vclock);
+	while (vclock_signature(&vclock_local) < sign) {
+		struct xrow_header *row = &r->commit.queue[r->commit.begin];
+		vclock_follow(&vclock_local, row->server_id, row->lsn);
+		recovery_rollback_row(r);
+		assert(r->commit.end != r->commit.begin);
+	}
+}
 
 /**
  * @retval 0 OK, read full xlog.
@@ -279,16 +342,46 @@ recover_xlog(struct recovery_state *r, struct xlog *l)
 	auto guard = make_scoped_guard([&]{
 		xlog_cursor_close(&i);
 	});
+	bool panic = l->dir->panic_if_error;
+	struct region *reg = NULL;
+	if (l->snap || r != recovery) {
+		reg = &fiber()->gc;
+	} else {
+		reg = &r->commit.queue_gc[r->commit.end];
+		if (!r->commit.queue_gc_init[r->commit.end])
+			region_create(reg, &cord()->slabc);
+	}
+	for (struct xrow_header *row = &r->commit.queue[r->commit.end];
+		xlog_cursor_next(&i, row, reg) == 0;
+		row = &r->commit.queue[r->commit.end])
+	{
+		if (l->snap || r != recovery) {
+			recovery_apply_row(r, row);
+			continue;
+		}
+		if (++r->commit.end == MAX_UNCOMMITED_ROWS)
+			r->commit.end = 0;
+		assert(r->commit.end != r->commit.begin);
 
-	struct xrow_header row;
-	while (xlog_cursor_next(&i, &row) == 0) {
-		try {
-			recovery_apply_row(r, &row);
-		} catch (ClientError *e) {
-			if (l->dir->panic_if_error)
-				throw;
-			say_error("can't apply row: ");
-			e->log();
+		reg = &r->commit.queue_gc[r->commit.end];
+		if (!r->commit.queue_gc_init[r->commit.end])
+			region_create(reg, &cord()->slabc);
+
+		if (row->commit_sn == 0 && row->rollback_sn == 0)
+			continue;
+		if (row->commit_sn && row->rollback_sn) {
+			if (row->commit_sn > row->rollback_sn) {
+				recovery_rollback_rows(r, row->rollback_sn);
+				recovery_commit_rows(r, row->commit_sn, panic);
+			} else {
+				recovery_commit_rows(r, row->commit_sn, panic);
+				recovery_rollback_rows(r, row->rollback_sn);
+			}
+		} else {
+			if (row->commit_sn)
+				recovery_commit_rows(r, row->commit_sn, panic);
+			else
+				recovery_rollback_rows(r, row->rollback_sn);
 		}
 	}
 	/**
@@ -323,12 +416,13 @@ recovery_bootstrap(struct recovery_state *r)
 	const char *filename = "bootstrap.snap";
 	FILE *f = fmemopen((void *) &bootstrap_bin,
 			   sizeof(bootstrap_bin), "r");
-	struct xlog *snap = xlog_open_stream(&r->snap_dir, 0, f, filename);
+	struct xlog *snap = xlog_open_stream(&r->snap_dir, 0, f, filename, true);
 	auto guard = make_scoped_guard([=]{
 		xlog_close(snap);
 	});
 	/** The snapshot must have a EOF marker. */
 	recover_xlog(r, snap);
+	assert(r->commit.begin == r->commit.end);
 }
 
 /** Find out if there are new .xlog files since the current
@@ -384,7 +478,7 @@ recover_remaining_wals(struct recovery_state *r)
 			current_signature = vclock_signature(current_vclock);
 		}
 		try {
-			next_wal = xlog_open(&r->wal_dir, current_signature);
+			next_wal = xlog_open(&r->wal_dir, current_signature, false);
 		} catch (XlogError *e) {
 			e->log();
 			break;
@@ -426,7 +520,7 @@ recover_current_wal:
 		tnt_raise(XlogError,
 			  "not all WALs have been successfully read");
 	}
-
+	recovery_rollback_end(r);
 	region_free(&fiber()->gc);
 }
 
@@ -453,7 +547,6 @@ recovery_finalize(struct recovery_state *r, enum wal_mode wal_mode,
 		}
 		recovery_close_log(r);
 	}
-
 	r->wal_mode = wal_mode;
 	if (r->wal_mode == WAL_FSYNC)
 		(void) strcat(r->wal_dir.open_wflags, "s");
@@ -468,13 +561,27 @@ recovery_finalize(struct recovery_state *r, enum wal_mode wal_mode,
 
 static void
 recovery_follow_f(va_list ap)
-{
+try {
 	struct recovery_state *r = va_arg(ap, struct recovery_state *);
 	ev_tstamp wal_dir_rescan_delay = va_arg(ap, ev_tstamp);
 	fiber_set_user(fiber(), &admin_credentials);
 
 	while (! fiber_is_cancelled()) {
 		recover_remaining_wals(r);
+		/**
+		 * Try to switch to in-memory replication
+		 */
+		if (bsync_follow(r)) {
+			if (!cord_is_main()) {
+				say_info("async replication stopped, start sync");
+				r->watcher = NULL;
+				struct fiber *f =
+					bsync_recovery_fiber(r->server_id);
+				if (f)
+					fiber_call(f);
+			}
+			break;
+		}
 		/**
 		 * Allow an immediate wakeup/break loop
 		 * from recovery_stop_local().
@@ -489,6 +596,12 @@ recovery_follow_f(va_list ap)
 		}
 		fiber_set_cancellable(false);
 	}
+	r->watcher = NULL;
+} catch(FiberCancelException *e) {
+	say_error("replication cancelled");
+} catch(Exception* e) {
+	say_error("error found: %s", e->errmsg());
+	abort();
 }
 
 void
@@ -525,26 +638,6 @@ struct wal_write_request {
 	int64_t res;
 	struct fiber *fiber;
 	struct xrow_header *row;
-};
-
-/* Context of the WAL writer thread. */
-STAILQ_HEAD(wal_fifo, wal_write_request);
-
-struct wal_writer
-{
-	struct wal_fifo input;
-	struct wal_fifo commit;
-	struct cord cord;
-	pthread_mutex_t mutex;
-	pthread_cond_t cond;
-	ev_async write_event;
-	int rows_per_wal;
-	struct fio_batch *batch;
-	bool is_shutdown;
-	bool is_rollback;
-	ev_loop *txn_loop;
-	struct vclock vclock;
-	bool is_started;
 };
 
 static struct wal_writer wal_writer;
@@ -666,6 +759,10 @@ wal_writer_init(struct wal_writer *writer, struct vclock *vclock,
 	vclock_create(&writer->vclock);
 	vclock_copy(&writer->vclock, vclock);
 	writer->is_started = false;
+	memset(writer->commit_lsn, 0, sizeof(writer->commit_lsn));
+	memset(writer->commit_server_id, 0, sizeof(writer->commit_server_id));
+	writer->commit_begin = 0;
+	writer->commit_end = 0;
 }
 
 /** Destroy a WAL writer structure. */
@@ -706,8 +803,7 @@ wal_writer_start(struct recovery_state *r, int rows_per_wal)
 	/* I. Initialize the state. */
 	wal_writer_init(&wal_writer, &r->vclock, rows_per_wal);
 	r->writer = &wal_writer;
-
-	ev_async_start(wal_writer.txn_loop, &wal_writer.write_event);
+	bsync_start(r);
 
 	/* II. Start the thread. */
 
@@ -827,15 +923,60 @@ wal_fill_batch(struct xlog *wal, struct fio_batch *batch, int rows_per_wal,
 	return req;
 }
 
+static void
+wal_write_commit_sign(struct wal_writer *writer, uint64_t sign)
+{
+	while (vclock_signature(&writer->vclock) < sign) {
+		assert(writer->commit_begin != writer->commit_end);
+		vclock_follow(&writer->vclock,
+			writer->commit_server_id[writer->commit_begin],
+			writer->commit_lsn[writer->commit_begin]);
+		if (++writer->commit_begin == MAX_UNCOMMITED_ROWS)
+			writer->commit_begin = 0;
+	}
+}
+
+static void
+wal_write_rollback_sign(struct wal_writer *writer, uint64_t sign)
+{
+	struct vclock vclock_local;
+	vclock_copy(&vclock_local, &writer->vclock);
+	while (vclock_signature(&vclock_local) < sign) {
+		assert(writer->commit_begin != writer->commit_end);
+		vclock_follow(&vclock_local,
+			writer->commit_server_id[writer->commit_begin],
+			writer->commit_lsn[writer->commit_begin]);
+		if (++writer->commit_begin == MAX_UNCOMMITED_ROWS)
+			writer->commit_begin = 0;
+	}
+}
+
 static struct wal_write_request *
 wal_write_batch(struct xlog *wal, struct fio_batch *batch,
 		struct wal_write_request *req, struct wal_write_request *end,
-		struct vclock *vclock)
+		struct wal_writer *writer)
 {
 	int rows_written = fio_batch_write(batch, fileno(wal->f));
 	wal->rows += rows_written;
 	while (req != end && rows_written-- != 0)  {
-		vclock_follow(vclock, req->row->server_id, req->row->lsn);
+		writer->commit_lsn[writer->commit_end] = req->row->lsn;
+		writer->commit_server_id[writer->commit_end] =
+			req->row->server_id;
+		if (++writer->commit_end == MAX_UNCOMMITED_ROWS)
+			writer->commit_end = 0;
+		assert(writer->commit_end != writer->commit_begin);
+		if (req->row->commit_sn && req->row->rollback_sn) {
+			if (req->row->rollback_sn > req->row->commit_sn) {
+				wal_write_commit_sign(writer, req->row->commit_sn);
+				wal_write_rollback_sign(writer, req->row->rollback_sn);
+			} else {
+				wal_write_rollback_sign(writer, req->row->rollback_sn);
+				wal_write_commit_sign(writer, req->row->commit_sn);
+			}
+		} else if (req->row->commit_sn)
+			wal_write_commit_sign(writer, req->row->commit_sn);
+		else if (req->row->rollback_sn)
+			wal_write_rollback_sign(writer, req->row->rollback_sn);
 		req->res = 0;
 		req = STAILQ_NEXT(req, wal_fifo_entry);
 	}
@@ -860,7 +1001,7 @@ wal_write_to_disk(struct recovery_state *r, struct wal_writer *writer,
 		batch_end = wal_fill_batch(*wal, batch, writer->rows_per_wal,
 					   req);
 		write_end = wal_write_batch(*wal, batch, req, batch_end,
-					    &writer->vclock);
+					    writer);
 		if (batch_end != write_end)
 			break;
 		req = write_end;
@@ -912,20 +1053,15 @@ wal_writer_thread(void *worker_args)
  * WAL writer main entry point: queue a single request
  * to be written to disk and wait until this task is completed.
  */
+
 int64_t
 wal_write(struct recovery_state *r, struct xrow_header *row)
 {
-	/*
-	 * Bump current LSN even if wal_mode = NONE, so that
-	 * snapshots still works with WAL turned off.
-	 */
-	fill_lsn(r, row);
 	if (r->wal_mode == WAL_NONE)
 		return vclock_signature(&r->vclock);
 
-	ERROR_INJECT_RETURN(ERRINJ_WAL_IO);
-
 	struct wal_writer *writer = r->writer;
+	ERROR_INJECT_RETURN(ERRINJ_WAL_IO);
 
 	struct wal_write_request *req = (struct wal_write_request *)
 		region_alloc(&fiber()->gc, sizeof(struct wal_write_request));

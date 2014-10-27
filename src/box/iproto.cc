@@ -46,8 +46,8 @@
 #include "xrow.h"
 #include "iproto_constants.h"
 #include "user_def.h"
-#include "authentication.h"
 #include "stat.h"
+#include "tt_uuid.h"
 #include "lua/call.h"
 
 /* {{{ iproto_request - declaration */
@@ -75,6 +75,7 @@ struct iproto_request
 };
 
 struct mempool iproto_request_pool;
+struct tt_uuid local_server_uuid;
 
 static struct iproto_request *
 iproto_request_new(struct iproto_connection *con,
@@ -682,8 +683,8 @@ iproto_process(struct iproto_request *ireq)
 			assert(ireq->request.type == ireq->header.type);
 			const char *user = ireq->request.key;
 			uint32_t len = mp_decode_strl(&user);
-			authenticate(user, len, ireq->request.tuple,
-				     ireq->request.tuple_end);
+			box_authenticate(user, len, ireq->request.tuple,
+					 ireq->request.tuple_end);
 			iproto_reply_ok(&ireq->iobuf->out, ireq->header.sync);
 			break;
 		}
@@ -698,7 +699,13 @@ iproto_process(struct iproto_request *ireq)
 			 */
 			ev_io_stop(con->loop, &con->input);
 			ev_io_stop(con->loop, &con->output);
-			box_process_join(con->input.fd, &ireq->header);
+			if (box_process_join(con->input.fd, &ireq->header)) {
+				ev_io_start(con->loop, &con->input);
+				ev_io_start(con->loop, &con->output);
+			} else {
+				/* TODO: check requests in `con' queue */
+				iproto_connection_shutdown(con);
+			}
 			break;
 		case IPROTO_SUBSCRIBE:
 			ev_io_stop(con->loop, &con->input);
@@ -734,19 +741,6 @@ iproto_request_new(struct iproto_connection *con,
 	return ireq;
 }
 
-const char *
-iproto_greeting(const char *salt)
-{
-	static __thread char greeting[IPROTO_GREETING_SIZE + 1];
-	char base64buf[SESSION_SEED_SIZE * 4 / 3 + 5];
-
-	base64_encode(salt, SESSION_SEED_SIZE, base64buf, sizeof(base64buf));
-	snprintf(greeting, sizeof(greeting),
-		 "Tarantool %-20s %-32s\n%-63s\n",
-		 tarantool_version(), custom_proc_title, base64buf);
-	return greeting;
-}
-
 /**
  * Handshake a connection: invoke the on-connect trigger
  * and possibly authenticate. Try to send the client an error
@@ -760,8 +754,9 @@ iproto_process_connect(struct iproto_request *request)
 	int fd = con->input.fd;
 	try {              /* connect. */
 		con->session = session_create(fd, con->cookie);
-		coio_write(&con->input, iproto_greeting(con->session->salt),
-			   IPROTO_GREETING_SIZE);
+		const char *greeting = xrow_encode_greeting(con->session->salt,
+							    &local_server_uuid);
+		coio_write(&con->input, greeting, IPROTO_GREETING_SIZE);
 		if (! rlist_empty(&session_on_connect))
 			session_run_on_connect_triggers(con->session);
 	} catch (SocketError *e) {
@@ -823,8 +818,9 @@ iproto_on_accept(struct evio_service * /* service */, int fd,
 
 /** Initialize a read-write port. */
 void
-iproto_init(struct evio_service *service)
+iproto_init(struct evio_service *service, const struct tt_uuid *local_uuid)
 {
+	memcpy(&local_server_uuid, local_uuid, sizeof(struct tt_uuid));
 	mempool_create(&iproto_request_pool, &cord()->slabc,
 		       sizeof(struct iproto_request));
 	iproto_queue_init(&request_queue);

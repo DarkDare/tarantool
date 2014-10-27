@@ -149,6 +149,10 @@ struct errcode_record {
 	/* 95 */_(ER_UPDATE_INTEGER_OVERFLOW,   2, "Integer overflow when performing '%c' operation on field %u") \
 	/* 96 */_(ER_GUEST_USER_PASSWORD,       2, "Setting password for guest user has no effect") \
 	/* 97 */_(ER_TRANSACTION_CONFLICT,      2, "Transaction has been aborted by conflict") \
+	/* 98 */_(ER_BSYNC_REJECT,		2, "Operation was rejected by certification") \
+	/* 99 */_(ER_BSYNC_ROLLBACK,		2, "Operation was rejected by quorum") \
+	/* 100*/_(ER_SERVER_ID_IS_LOCAL,	2, "Try to join to itself") \
+	/* 101*/_(ER_BSYNC_SLAVE_INVALID,       2, "Operation from leader isnt valid for slave")
 
 /*
  * !IMPORTANT! Please follow instructions at start of the file

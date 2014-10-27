@@ -196,6 +196,8 @@ struct xlog {
 	 * is vector clock *at the time the snapshot is taken*.
 	 */
 	struct vclock vclock;
+
+	bool snap;
 };
 
 /**
@@ -209,7 +211,7 @@ struct xlog {
  * Raises an exception in case of error.
  */
 struct xlog *
-xlog_open(struct xdir *dir, int64_t signature);
+xlog_open(struct xdir *dir, int64_t signature, bool snap);
 
 /**
  * Open an xlog from a pre-created stdio stream.
@@ -224,7 +226,7 @@ xlog_open(struct xdir *dir, int64_t signature);
 
 struct xlog *
 xlog_open_stream(struct xdir *dir, int64_t signature,
-		 FILE *file, const char *filename);
+		 FILE *file, const char *filename, bool snap);
 
 /**
  * Create a new file and open it in write (append) mode.
@@ -283,7 +285,8 @@ void
 xlog_cursor_close(struct xlog_cursor *i);
 
 int
-xlog_cursor_next(struct xlog_cursor *i, struct xrow_header *packet);
+xlog_cursor_next(struct xlog_cursor *i, struct xrow_header *packet,
+		 struct region *gc);
 
 /* }}} */
 

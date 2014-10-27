@@ -34,32 +34,20 @@ static char zero_hash[SCRAMBLE_SIZE];
 
 void
 authenticate(const char *user_name, uint32_t len,
-	     const char *tuple, const char * /* tuple_end */)
+	     const char *scramble, uint32_t scramble_len)
 {
 	struct user *user = user_cache_find_by_name(user_name, len);
 	struct session *session = current_session();
-	uint32_t part_count;
-	uint32_t scramble_len;
-	const char *scramble;
 	/*
 	 * Allow authenticating back to GUEST user without
 	 * checking a password. This is useful for connection
 	 * pooling.
 	 */
-	part_count = mp_decode_array(&tuple);
-	if (part_count == 0 && user->uid == GUEST &&
+	if (scramble == NULL && user->uid == GUEST &&
 	    memcmp(user->hash2, zero_hash, SCRAMBLE_SIZE) == 0) {
 		/* No password is set for GUEST, OK. */
 		goto ok;
 	}
-
-	if (part_count < 2) {
-		/* Expected at least: authentication mechanism and data. */
-		tnt_raise(ClientError, ER_INVALID_MSGPACK,
-			   "authentication request body");
-	}
-	mp_next(&tuple); /* Skip authentication mechanism. */
-	scramble = mp_decode_str(&tuple, &scramble_len);
 	if (scramble_len != SCRAMBLE_SIZE) {
 		/* Authentication mechanism, data. */
 		tnt_raise(ClientError, ER_INVALID_MSGPACK,

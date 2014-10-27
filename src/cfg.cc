@@ -70,6 +70,7 @@ cfg_tostring(struct lua_State *L)
 const char *
 cfg_gets(const char *param)
 {
+	/* Support simultaneous cfg_gets("str1") and cfg_gets("str2") */
 	cfg_get(param);
 	const char *val = cfg_tostring(tarantool_L);
 	lua_pop(tarantool_L, 1);

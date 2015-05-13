@@ -20,10 +20,11 @@ local log = require('log')
 -- see default_cfg below
 local default_sophia_cfg = {
     memory_limit = 0,
-    threads      = 5,
-    node_size    = 134217728,
-    page_size    = 131072,
-    compression  = "none"
+    threads         = 5,
+    node_size       = 134217728,
+    page_size       = 131072,
+    compression     = "none",
+    compression_key = 0
 }
 
 -- all available options
@@ -64,11 +65,12 @@ local default_cfg = {
 
 -- see template_cfg below
 local sophia_template_cfg = {
-    memory_limit = 'number',
-    threads      = 'number',
-    node_size    = 'number',
-    page_size    = 'number',
-    compression  = 'string'
+    memory_limit    = 'number',
+    threads         = 'number',
+    node_size       = 'number',
+    page_size       = 'number',
+    compression     = 'string',
+    compression_key = 'number'
 }
 
 -- types of available options

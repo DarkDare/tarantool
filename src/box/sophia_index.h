@@ -51,4 +51,7 @@ public:
 	void *db;
 };
 
+struct tuple*
+sophia_tuple(void*, struct key_def*, struct tuple_format*);
+
 #endif /* TARANTOOL_BOX_SOPHIA_INDEX_H_INCLUDED */

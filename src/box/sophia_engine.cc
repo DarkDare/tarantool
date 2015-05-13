@@ -37,6 +37,7 @@
 #include "sophia_index.h"
 #include "recovery.h"
 #include "space.h"
+#include "schema.h"
 #include "request.h"
 #include "iproto_constants.h"
 #include "replication.h"
@@ -263,7 +264,7 @@ void
 SophiaEngine::keydefCheck(struct space *space, struct key_def *key_def)
 {
 	switch (key_def->type) {
-	case TREE:
+	case TREE: {
 		if (! key_def->is_unique) {
 			tnt_raise(ClientError, ER_MODIFY_INDEX,
 				  key_def->name,
@@ -276,20 +277,25 @@ SophiaEngine::keydefCheck(struct space *space, struct key_def *key_def)
 				  space_name(space),
 				  "Sophia TREE secondary indexes are not supported");
 		}
-		if (key_def->part_count != 1) {
-			tnt_raise(ClientError, ER_MODIFY_INDEX,
-				  key_def->name,
-				  space_name(space),
-				  "Sophia TREE index key can not be multipart");
-		}
-		if (key_def->parts[0].type != NUM &&
-		    key_def->parts[0].type != STRING) {
-			tnt_raise(ClientError, ER_MODIFY_INDEX,
-				  key_def->name,
-				  space_name(space),
-				  "Sophia TREE index field type must be STR or NUM");
+		int i = 0;
+		while (i < key_def->part_count) {
+			struct key_part *part = &key_def->parts[i];
+			if (part->type != NUM && part->type != STRING) {
+				tnt_raise(ClientError, ER_MODIFY_INDEX,
+				          key_def->name,
+				          space_name(space),
+				          "Sophia TREE index field type must be STR or NUM");
+			}
+			if (part->fieldno != i) {
+				tnt_raise(ClientError, ER_MODIFY_INDEX,
+				          key_def->name,
+				          space_name(space),
+				          "Sophia TREE key-parts must follow first and cannot be sparse");
+			}
+			i++;
 		}
 		break;
+	}
 	default:
 		tnt_raise(ClientError, ER_INDEX_TYPE,
 			  key_def->name,

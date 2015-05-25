@@ -156,6 +156,40 @@ sophia_send_row(Relay *relay, uint32_t space_id, char *tuple,
 	relay_send(relay, &row);
 }
 
+static inline struct key_def*
+sophia_join_key_def(void *db)
+{
+	/* prepare space schema */
+	void *dbctl = sp_ctl(db);
+	void *oid = sp_get(dbctl, "name");
+	char *name = (char*)sp_get(oid, "value", NULL);
+	char *pe = NULL;
+	uint32_t space_id = strtoul(name, &pe, 10);
+	sp_destroy(oid);
+	void *opart = sp_get(dbctl, "partcount");
+	char *partcountsz = (char*)sp_get(opart, "value", NULL);
+	uint32_t partcount = strtoul(partcountsz, &pe, 10);
+	sp_destroy(opart);
+	struct key_def *key_def;
+	key_def = key_def_new(space_id, 0, "sophia_join", TREE, true, partcount);
+	int i = 0;
+	while (i < partcount) {
+		char part[32];
+		snprintf(part, sizeof(part), "%d", i);
+		void *opart = sp_get(dbctl, part);
+		char *parttype = (char*)sp_get(oid, "value", NULL);
+		key_def->parts[i].fieldno = i;
+		if (strcmp(parttype, "string") == 0)
+			key_def->parts[i].type = STRING;
+		else
+		if (strcmp(parttype, "u64") == 0)
+			key_def->parts[i].type = NUM;
+		sp_destroy(opart);
+		i++;
+	}
+	return key_def;
+}
+
 /**
  * Relay all data that should be present in the snapshot
  * to the replica.
@@ -180,37 +214,42 @@ SophiaEngine::join(Relay *relay)
 	void *db_cursor = sp_ctl(snapshot, "db_list");
 	if (db_cursor == NULL)
 		sophia_raise(env);
+
 	while (sp_get(db_cursor)) {
 		void *db = sp_object(db_cursor);
-
-		/* get space id */
-		void *dbctl = sp_ctl(db);
-		void *oid = sp_get(dbctl, "name");
-		char *name = (char*)sp_get(oid, "value", NULL);
-		char *pe = NULL;
-		uint32_t space_id = strtoul(name, &pe, 10);
-		sp_destroy(oid);
-
+		/* prepare space schema */
+		struct key_def *key_def;
+		try {
+			key_def = sophia_join_key_def(db);
+		} catch (...) {
+			sp_destroy(db_cursor);
+			throw;
+		}
 		/* send database */
 		void *o = sp_object(db);
 		void *cursor = sp_cursor(snapshot, o);
 		if (cursor == NULL) {
 			sp_destroy(db_cursor);
+			key_def_delete(key_def);
 			sophia_raise(env);
 		}
 		while (sp_get(cursor)) {
 			o = sp_object(cursor);
-			uint32_t tuple_size = 0;
-			char *tuple = (char *)sp_get(o, "value", &tuple_size);
+			uint32_t tuple_size;
+			char *tuple = (char *)sophia_tuple(o, key_def, NULL, &tuple_size);
 			try {
-				sophia_send_row(relay, space_id, tuple, tuple_size);
+				sophia_send_row(relay, key_def->space_id, tuple, tuple_size);
 			} catch (...) {
+				key_def_delete(key_def);
+				free(tuple);
 				sp_destroy(cursor);
 				sp_destroy(db_cursor);
 				throw;
 			}
+			free(tuple);
 		}
 		sp_destroy(cursor);
+		key_def_delete(key_def);
 	}
 	sp_destroy(db_cursor);
 }

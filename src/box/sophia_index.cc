@@ -84,8 +84,7 @@ sophia_key(void *env, void *db, struct key_def *key_def,
 	return o;
 }
 
-struct tuple*
-sophia_tuple(void *o, struct key_def *key_def, struct tuple_format *format)
+void *sophia_tuple(void *o, struct key_def *key_def, struct tuple_format *format, uint32_t *bsize)
 {
 	int valuesize = 0;
 	char *value = (char*)sp_get(o, "value", &valuesize);
@@ -122,10 +121,21 @@ sophia_tuple(void *o, struct key_def *key_def, struct tuple_format *format)
 	}
 	size += mp_sizeof_array(count);
 	size += valuesize;
+	if (bsize)
+		*bsize = size;
 
 	/* build tuple */
-	struct tuple *tuple = tuple_alloc(format, size);
-	p = tuple->data;
+	struct tuple *tuple;
+	char *raw;
+	if (format) {
+		tuple = tuple_alloc(format, size);
+		p = tuple->data;
+	} else {
+		raw = (char*)malloc(size);
+		if (raw == NULL)
+			tnt_raise(ClientError, ER_MEMORY_ISSUE, size, "tuple");
+		p = raw;
+	}
 	p = mp_encode_array(p, count);
 	for (i = 0; i < key_def->part_count; i++) {
 		if (key_def->parts[i].type == STRING)
@@ -134,13 +144,16 @@ sophia_tuple(void *o, struct key_def *key_def, struct tuple_format *format)
 			p = mp_encode_uint(p, *(uint64_t*)parts[i].part);
 	}
 	memcpy(p, value, valuesize);
-	try {
-		tuple_init_field_map(format, tuple, (uint32_t*)tuple);
-	} catch (...) {
-		tuple_delete(tuple);
-		throw;
+	if (format) {
+		try {
+			tuple_init_field_map(format, tuple, (uint32_t*)tuple);
+		} catch (...) {
+			tuple_delete(tuple);
+			throw;
+		}
+		return tuple;
 	}
-	return tuple;
+	return raw;
 }
 
 static inline void
@@ -181,7 +194,7 @@ sophia_read(void *env, void *db, void *tx, const char *key,
 	auto scoped_guard =
 		make_scoped_guard([=] { sp_destroy(result); });
 
-	return sophia_tuple(result, key_def, format);
+	return (struct tuple *)sophia_tuple(result, key_def, format, NULL);
 }
 
 static inline void*
@@ -420,7 +433,7 @@ sophia_iterator_next(struct iterator *ptr)
 	void *o = sp_get(it->cursor);
 	if (o == NULL)
 		return NULL;
-	return sophia_tuple(o, it->key_def, it->space->format);
+	return (struct tuple *)sophia_tuple(o, it->key_def, it->space->format, NULL);
 }
 
 struct tuple *

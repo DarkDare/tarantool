@@ -58,6 +58,24 @@ lbox_trigger_find(struct lua_State *L, int index,
 	return NULL;
 }
 
+int
+lbox_list_all_triggers(struct lua_State *L, struct rlist *list)
+{
+	struct trigger *trigger;
+	int count = 1;
+	lua_newtable(L);
+	rlist_foreach_entry_reverse(trigger, list, link) {
+		lua_rawgeti(L, LUA_REGISTRYINDEX, (intptr_t) trigger->data);
+		if (! lua_isnil(L, -1)) {
+			lua_rawseti(L, -2, count);
+			count++;
+		} else {
+			lua_pop(L, 1);
+		}
+	}
+	return 1;
+}
+
 void
 lbox_trigger_check_input(struct lua_State *L, int top)
 {
@@ -65,12 +83,15 @@ lbox_trigger_check_input(struct lua_State *L, int top)
 	/* Push optional arguments. */
 	while (lua_gettop(L) < top)
 		lua_pushnil(L);
-	/* (nil, function) is OK,
+	/*
+	 * (nil, function) is OK,
 	 * (function, nil), is OK,
 	 * (function, function) is OK,
+	 * no arguments is OK,
 	 * anything else is error.
 	 */
-	if ((lua_isfunction(L, top) && lua_isnil(L, top - 1)) ||
+	if ((lua_isnil(L, top) && lua_isnil(L, top - 1)) ||
+	    (lua_isfunction(L, top) && lua_isnil(L, top - 1)) ||
 	    (lua_isnil(L, top) && lua_isfunction(L, top - 1)) ||
 	    (lua_isfunction(L, top) && lua_isfunction(L, top - 1)))
 		return;
@@ -82,7 +103,14 @@ int
 lbox_trigger_reset(struct lua_State *L, int top,
 		   struct rlist *list, trigger_f run)
 {
+	/**
+	 * If the stack is empty, pushes nils for optional
+	 * arguments
+	 */
 	lbox_trigger_check_input(L, top);
+	/* If no args - return triggers table */
+	if (lua_isnil(L, top) && lua_isnil(L, top - 1))
+		return lbox_list_all_triggers(L, list);
 
 	struct trigger *trg = lbox_trigger_find(L, top, list, run);
 
@@ -113,6 +141,8 @@ lbox_trigger_reset(struct lua_State *L, int top,
 		/* Reference. */
 		trg->data = (void *) (intptr_t)
 			luaL_ref(L, LUA_REGISTRYINDEX);
+		lua_rawgeti(L, LUA_REGISTRYINDEX, (intptr_t) trg->data);
+		return 1;
 
 	} else {
 		trigger_clear(trg);

@@ -1,20 +1,12 @@
 #!/usr/bin/env tarantool
 
-box.cfg{
+box.cfg({
     listen              = os.getenv("LISTEN"),
+    replication_source  = os.getenv("MASTER"),
     slab_alloc_arena    = 0.1,
     pid_file            = "tarantool.pid",
-    rows_per_wal        = 500000
-}
+    logger              = "tarantool.log",
+    custom_proc_title   = "replica",
+})
 
 require('console').listen(os.getenv('ADMIN'))
-
-function compare(a,b)
-    return a[1] < b[1]
-end
-
-function sorted(data)
-    table.sort(data, compare)
-    return data
-end
-

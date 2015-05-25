@@ -199,3 +199,4 @@ box.sort(s0.index['i2']:select(0))
 
 s0:drop()
 s0 = nil
+

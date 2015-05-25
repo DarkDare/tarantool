@@ -269,7 +269,7 @@ recover_snap(struct recovery_state *r)
 		tnt_raise(ClientError, ER_MISSING_SNAPSHOT);
 	int64_t signature = vclock_signature(res);
 
-	struct xlog *snap = xlog_open(&r->snap_dir, signature, NONE);
+	struct xlog *snap = xlog_open(&r->snap_dir, signature);
 	auto guard = make_scoped_guard([=]{
 		xlog_close(snap);
 	});
@@ -488,10 +488,10 @@ MemtxEngine::beginStatement(struct txn *txn)
 	if (txn->autocommit == false && txn->n_stmts == 1) {
 
 		txn->fiber_on_yield = {
-			rlist_nil, txn_on_yield_or_stop, NULL, NULL
+			RLIST_LINK_INITIALIZER, txn_on_yield_or_stop, NULL, NULL
 		};
 		txn->fiber_on_stop = {
-			rlist_nil, txn_on_yield_or_stop, NULL, NULL
+			RLIST_LINK_INITIALIZER, txn_on_yield_or_stop, NULL, NULL
 		};
 		/*
 		 * Memtx doesn't allow yields between statements of
@@ -690,8 +690,6 @@ snapshot_save(struct recovery_state *r)
 
 	space_foreach(snapshot_space, snap);
 
-	/** suppress rename */
-	snap->is_inprogress = false;
 	xlog_close(snap);
 
 	say_info("done");

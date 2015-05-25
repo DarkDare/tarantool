@@ -6,7 +6,7 @@ This chapter describes how Tarantool stores values
 and what operations with data it supports. 
 
 ==================
-Dynamic data model
+Document data model
 ==================
 
 If you tried out the
@@ -64,11 +64,11 @@ as the space name -- 'tester' in the example.
 A tuple fills the same role as a “row” or a “record”,
 and the components of a tuple (which we call “fields”)
 fill the same role as a “row column” or “record field”,
-except that: the fields of a tuple don't need to have names.
+except that: the fields of a tuple can be composite
+structures, such as arrays or maps and don't need to have names.
 That's why there was no need to pre-define the tuple set
 when creating the space, and that's why each tuple can
-have a different number of elements, and that's why
-we say that Tarantool has a “dynamic” data model.
+have a different number of elements.
 Tuples are stored as `MsgPack`_ arrays.
 
 .. _MsgPack: https://en.wikipedia.org/wiki/MessagePack
@@ -111,16 +111,16 @@ The first index is called the “*primary key*” index and it must be unique;
 all other indexes are called “secondary” indexes.
 
 An index definition may include identifiers of tuple fields
-and their expected types. The allowed types are NUM
-(64-bit unsigned integer between 0 and 18,446,744,073,709,551,615),
-or STR (string, any sequence of octets), or ARRAY
+and their expected types. The allowed types for indexed fields are NUM
+(64-bit unsigned integer between -9,223,372,036,854,775,807 and
+18,446,744,073,709,551,615), or STR (string, any sequence of octets), or ARRAY
 (a series of numbers for use with :ref:`RTREE indexes <RTREE>`.
 Take our example, which has the request:
 
   i = s:create_index('primary', {type = 'hash', parts = {1, 'NUM'}})
 
 The effect is that, for all tuples in tester,
-field number 1 must exist and must be a 64-bit unsigned integer.
+field number 1 must exist and must be a 64-bit integer.
 
 Space definitions and index definitions are stored permanently
 in system spaces. It is possible to add, drop, or alter the
@@ -496,24 +496,7 @@ the Tarantool server's storage functionality with the ``box`` Lua library.
 
 The contents of the box library can be inspected at runtime with ``box``, with
 no arguments. The packages inside the box library are:
-
-.. toctree::
-    :maxdepth: 1
-
-    box_schema
-    box_tuple
-    box_space
-    box_index
-    box_session
-    box_error
-    box_introspection
-    net_box
-    admin
-    atomic
-    authentication
-    limitations
-    triggers
-
+box.schema, box.tuple, box.space, box.index, net.box, box.cfg, box.info, box.slab, box.stat.
 Every package contains one or more Lua functions. A few packages contain
 members as well as functions. The functions allow data definition (create
 alter drop), data manipulation (insert delete update select replace), and
@@ -570,6 +553,25 @@ The manual concentrates on memtx because it is the default and has been around
 longer. But sophia is a working key-value engine and will especially appeal to
 users who like to see data go directly to disk, so that recovery time might be
 shorter and database size might be larger. For architectural explanations and
-benchmarks, see sphia.org. On the other hand, sophia lacks some functions and
+benchmarks, see `sphia.org`_. On the other hand, sophia lacks some functions and
 options that are available with memtx. Where that is the case, the relevant
 description will contain the words "only applicable for the memtx storage engine".
+
+.. _sphia.org: http://sphia.org
+
+.. toctree::
+    :maxdepth: 1
+
+    box_schema
+    box_space
+    box_index
+    box_session
+    box_error
+    box_tuple
+    box_introspection
+    net_box
+    admin
+    atomic
+    authentication
+    limitations
+    triggers

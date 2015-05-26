@@ -145,8 +145,6 @@ txn_commit(struct txn *txn)
 	if (txn->engine)
 		txn->engine->prepare(txn);
 
-	trigger_clear(&txn->fiber_on_yield);
-	trigger_clear(&txn->fiber_on_stop);
 	if (!recovery->bsync_remote) {
 		static struct vclock commit_clock;
 		if (!vclock_signature(&commit_clock) &&

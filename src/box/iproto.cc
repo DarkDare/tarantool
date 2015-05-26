@@ -702,9 +702,6 @@ iproto_process(struct iproto_request *ireq)
 			if (box_process_join(con->input.fd, &ireq->header)) {
 				ev_io_start(con->loop, &con->input);
 				ev_io_start(con->loop, &con->output);
-			} else {
-				/* TODO: check requests in `con' queue */
-				iproto_connection_shutdown(con);
 			}
 			break;
 		case IPROTO_SUBSCRIBE:

@@ -1136,6 +1136,8 @@ bsync_write_local(struct recovery_state *r, struct txn_stmt *stmt)
 	vclock_follow(&txn_state.vclock, stmt->row->server_id,
 			stmt->row->lsn);
 	stmt->row->commit_sn = vclock_signature(&txn_state.vclock);
+	say_debug("bsync_write_local receive %d:%ld", stmt->row->server_id,
+		stmt->row->lsn);
 	return wal_write(r, stmt->row);
 }
 
@@ -1154,6 +1156,8 @@ bsync_write_remote(struct txn_stmt *stmt)
 		vclock_follow(&local_state->vclock, stmt->row->server_id,
 				stmt->row->lsn);
 	}
+	say_debug("bsync_write_remote receive %d:%ld", stmt->row->server_id,
+		stmt->row->lsn);
 	if (vclock_get(&txn_state.vclock, stmt->row->server_id) < stmt->row->lsn)
 		vclock_follow(&txn_state.vclock, stmt->row->server_id,
 				stmt->row->lsn);
@@ -1188,7 +1192,6 @@ int
 bsync_write(struct recovery_state *r, struct txn_stmt *stmt) try {BSYNC_TRACE
 	if (!local_state->bsync_remote)
 		return wal_write(r, stmt->row);
-
 	assert(local_state == NULL || local_state == r);
 	if (txn_in_local_recovery())
 		return bsync_write_local(r, stmt);

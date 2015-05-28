@@ -145,37 +145,13 @@ txn_commit(struct txn *txn)
 	if (txn->engine)
 		txn->engine->prepare(txn);
 
-	if (!recovery->bsync_remote) {
-		static struct vclock commit_clock;
-		if (!vclock_signature(&commit_clock) &&
-			recovery->wal_mode != WAL_NONE)
-			vclock_copy(&commit_clock, &recovery->vclock);
-		struct xrow_header *row = NULL;
-		rlist_foreach_entry(stmt, &txn->stmts, next) {
-			if ((!stmt->old_tuple && !stmt->new_tuple) ||
-			    space_is_temporary(stmt->space))
-			{
-				if (stmt->row && stmt->row->commit_sn > 0) {
-					assert(!stmt->old_tuple && !stmt->new_tuple);
-					vclock_follow(&recovery->vclock,
-						stmt->row->server_id,
-						stmt->row->lsn);
-				}
-				continue;
-			}
-			wal_fill_lsn(recovery, stmt->row);
-			if (recovery->wal_mode != WAL_NONE) {
-				vclock_follow(&commit_clock, stmt->row->server_id,
-						stmt->row->lsn);
-			}
-			row = stmt->row;
-		}
-		if (row)
-			row->commit_sn = vclock_signature(&commit_clock);
-	}
 	rlist_foreach_entry(stmt, &txn->stmts, next) {
 		if (stmt->row == NULL)
 			continue;
+		if (!recovery->bsync_remote) {
+			wal_fill_lsn(recovery, stmt->row);
+			stmt->row->commit_sn = vclock_signature(&recovery->vclock);
+		}
 		ev_tstamp start = ev_now(loop()), stop;
 		int64_t res = bsync_write(recovery, stmt);
 		stop = ev_now(loop());

@@ -159,20 +159,7 @@ replication_subscribe_f(va_list ap)
 		RLIST_LINK_INITIALIZER, feed_event_f, &read_ev, NULL
 	};
 	trigger_add(&r->watcher->on_stop, &on_follow_error);
-	bsync_set_recovery_fiber(r->server_id, fiber());
-	while (r->watcher && ! fiber_is_dead(r->watcher)) {
-		if (!r->watcher) {
-			try {
-				struct xrow_header response;
-				xrow_encode_vclock(&response, &r->vclock);
-				replication_send_row(relay, &response);
-				return;
-			} catch (Exception *e) {
-				e->log();
-				say_info("the replica has closed its socket");
-			}
-			goto end;
-		}
+	while (! fiber_is_dead(r->watcher)) {
 
 		ev_io_start(loop(), &read_ev);
 		fiber_yield();
@@ -189,9 +176,10 @@ replication_subscribe_f(va_list ap)
 		    errno != EWOULDBLOCK)
 			say_syserror("recv");
 	}
-end:
-	bsync_recovery_fail(r);
 	recovery_stop_local(r);
+	struct xrow_header response;
+	xrow_encode_vclock(&response, &r->vclock);
+	replication_send_row(relay, &response);
 	say_crit("exiting the relay loop");
 }
 
@@ -245,7 +233,12 @@ replication_subscribe(struct recovery_state *lr, int fd,
 	assert(cord_is_main());
 	struct cord cord;
 	cord_costart(&cord, "subscribe", replication_subscribe_f, &relay);
-	cord_cojoin(&cord);
+	try {
+		cord_cojoin(&cord);
+	} catch (...) {
+		bsync_recovery_fail(relay.r);
+		throw;
+	}
 	bsync_recovery_stop(relay.r);
 }
 

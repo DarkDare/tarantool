@@ -64,9 +64,6 @@ bool bsync_process_join(int fd, struct tt_uuid *uuid);
 bool bsync_process_subscribe(int fd, struct tt_uuid *uuid,
 			struct recovery_state *state);
 
-void bsync_set_recovery_fiber(int server_id, struct fiber *f);
-struct fiber * bsync_recovery_fiber(int server_id);
-
 bool bsync_follow(struct recovery_state *r);
 
 void bsync_recovery_stop(struct recovery_state *r);

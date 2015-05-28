@@ -574,11 +574,6 @@ try {
 		if (bsync_follow(r)) {
 			if (!cord_is_main()) {
 				say_info("async replication stopped, start sync");
-				r->watcher = NULL;
-				struct fiber *f =
-					bsync_recovery_fiber(r->server_id);
-				if (f)
-					fiber_call(f);
 			}
 			break;
 		}
@@ -596,12 +591,10 @@ try {
 		}
 		fiber_set_cancellable(false);
 	}
-	r->watcher = NULL;
 } catch(FiberCancelException *e) {
 	say_error("replication cancelled");
 } catch(Exception* e) {
 	say_error("error found: %s", e->errmsg());
-	abort();
 }
 
 void
@@ -959,12 +952,14 @@ wal_write_batch(struct xlog *wal, struct fio_batch *batch,
 	int rows_written = fio_batch_write(batch, fileno(wal->f));
 	wal->rows += rows_written;
 	while (req != end && rows_written-- != 0)  {
-		writer->commit_lsn[writer->commit_end] = req->row->lsn;
-		writer->commit_server_id[writer->commit_end] =
-			req->row->server_id;
-		if (++writer->commit_end == MAX_UNCOMMITED_ROWS)
-			writer->commit_end = 0;
-		assert(writer->commit_end != writer->commit_begin);
+		if (req->row->lsn || req->row->server_id) {
+			writer->commit_lsn[writer->commit_end] = req->row->lsn;
+			writer->commit_server_id[writer->commit_end] =
+				req->row->server_id;
+			if (++writer->commit_end == MAX_UNCOMMITED_ROWS)
+				writer->commit_end = 0;
+			assert(writer->commit_end != writer->commit_begin);
+		}
 		if (req->row->commit_sn && req->row->rollback_sn) {
 			if (req->row->rollback_sn > req->row->commit_sn) {
 				wal_write_commit_sign(writer, req->row->commit_sn);

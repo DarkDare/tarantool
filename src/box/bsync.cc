@@ -122,14 +122,12 @@ static struct bsync_system_status_ {
 	uint8_t state;
 	bool join[BSYNC_MAX_HOSTS];
 	bool iproto[BSYNC_MAX_HOSTS];
-	bool fail[BSYNC_MAX_HOSTS];
 	bool wait_local[BSYNC_MAX_HOSTS];
 	bool recovery;
 	uint8_t id2index[BSYNC_MAX_HOSTS];
 	pthread_mutex_t mutex[BSYNC_MAX_HOSTS];
 	pthread_cond_t cond[BSYNC_MAX_HOSTS];
 	struct fiber *snapshot_fiber;
-	struct fiber *recovery_fiber[BSYNC_MAX_HOSTS];
 
 	struct rlist incoming_connections;
 	struct rlist wait_start;
@@ -1010,18 +1008,6 @@ txn_process_reconnnect(struct bsync_txn_info *info)
 	}
 }
 
-void
-bsync_set_recovery_fiber(int server_id, struct fiber *f)
-{
-	txn_state.recovery_fiber[server_id] = f;
-}
-
-struct fiber *
-bsync_recovery_fiber(int server_id)
-{
-	return txn_state.recovery_fiber[server_id];
-}
-
 bool
 bsync_follow(struct recovery_state * r)
 {BSYNC_TRACE
@@ -1043,36 +1029,10 @@ bsync_follow(struct recovery_state * r)
 	return info->proxy;
 }
 
-static bool
-bsync_recovery_check(struct recovery_state *r)
-{
-	uint8_t host_id = BSYNC_MAX_HOSTS;
-	{
-		BSYNC_LOCK(txn_state.mutex[r->server_id]);
-		if (!txn_state.fail[r->server_id])
-			return false;
-		/* reconnect to host */
-		host_id = txn_state.id2index[r->server_id];
-		txn_state.id2index[r->server_id] = BSYNC_MAX_HOSTS;
-		txn_state.fail[r->server_id] = false;
-	}
-	if (evio_is_active(&local_state->remote[host_id].in))
-		evio_close(loop(), &local_state->remote[host_id].in);
-	if (evio_is_active(&local_state->remote[host_id].out))
-		evio_close(loop(), &local_state->remote[host_id].out);
-	struct bsync_txn_info *info = &bsync_index[host_id].sysmsg;
-	info->proxy = false;
-	SWITCH_TO_BSYNC(bsync_process_disconnect);
-	fiber_call(local_state->remote[host_id].connecter);
-	return true;
-}
-
 void
 bsync_recovery_stop(struct recovery_state *r)
 {BSYNC_TRACE
 	if (!local_state->bsync_remote)
-		return;
-	if (r && bsync_recovery_check(r))
 		return;
 	assert(loop() == txn_loop);
 	int host_id = txn_state.leader_id;
@@ -1111,8 +1071,17 @@ bsync_recovery_fail(struct recovery_state *r)
 {BSYNC_TRACE
 	if (!local_state->bsync_remote)
 		return;
-	BSYNC_LOCK(txn_state.mutex[r->server_id]);
-	txn_state.fail[r->server_id] = true;
+	uint8_t host_id = txn_state.id2index[r->server_id];
+	txn_state.id2index[r->server_id] = BSYNC_MAX_HOSTS;
+
+	if (evio_is_active(&local_state->remote[host_id].in))
+		evio_close(loop(), &local_state->remote[host_id].in);
+	if (evio_is_active(&local_state->remote[host_id].out))
+		evio_close(loop(), &local_state->remote[host_id].out);
+	struct bsync_txn_info *info = &bsync_index[host_id].sysmsg;
+	info->proxy = false;
+	SWITCH_TO_BSYNC(bsync_process_disconnect);
+	fiber_call(local_state->remote[host_id].connecter);
 }
 
 void
@@ -1163,13 +1132,10 @@ bsync_alloc_txn_info(struct xrow_header *row, bool proxy)
 static int
 bsync_write_local(struct recovery_state *r, struct txn_stmt *stmt)
 {BSYNC_TRACE
-	if (stmt->row) {
-		vclock_follow(&txn_state.vclock, stmt->row->server_id,
-				stmt->row->lsn);
-		stmt->row->commit_sn =
-			vclock_signature(&txn_state.vclock);
-	}
 	wal_fill_lsn(local_state, stmt->row);
+	vclock_follow(&txn_state.vclock, stmt->row->server_id,
+			stmt->row->lsn);
+	stmt->row->commit_sn = vclock_signature(&txn_state.vclock);
 	return wal_write(r, stmt->row);
 }
 
@@ -1243,6 +1209,8 @@ bsync_write(struct recovery_state *r, struct txn_stmt *stmt) try {BSYNC_TRACE
 		fiber_yield();
 		return 0;
 	}
+	if (!stmt->old_tuple && !stmt->new_tuple)
+		return 0;
 	assert(stmt->row->server_id > 0 || (stmt->row->commit_sn == 0 &&
 		stmt->row->rollback_sn == 0));
 	bsync_dump_region();
@@ -1276,11 +1244,9 @@ bsync_write(struct recovery_state *r, struct txn_stmt *stmt) try {BSYNC_TRACE
 	info->owner = fiber();
 	auto vclock_guard = make_scoped_guard([&](){
 		if (info->result < 0) {
-			if (info->result < 0) {
-				say_debug("row %d:%ld rejected from %s:%d",
-					  stmt->row->server_id, stmt->row->lsn,
-					  info->__from, info->__line);
-			}
+			say_debug("row %d:%ld rejected from %s:%d",
+				stmt->row->server_id, stmt->row->lsn,
+				info->__from, info->__line);
 			return;
 		}
 		say_debug("commit request %d:%ld sign=%ld",
@@ -2407,8 +2373,12 @@ bsync_process_wal(struct bsync_txn_info * info)
 }
 
 static void
-bsync_process(struct bsync_txn_info * /* info */)
+bsync_process(struct bsync_txn_info *info)
 {BSYNC_TRACE
+	tt_pthread_mutex_lock(&bsync_state.mutex);
+	struct bsync_txn_info *tmp = STAILQ_FIRST(&bsync_state.bsync_proxy_input);
+	tt_pthread_mutex_unlock(&bsync_state.mutex);
+	assert(tmp == info && info);
 	fiber_call(bsync_fiber(&bsync_state.bsync_fibers, bsync_process_fiber));
 }
 
@@ -3741,12 +3711,9 @@ bsync_init(struct recovery_state *r)
 	txn_state.recovery = false;
 	txn_state.snapshot_fiber = NULL;
 	memset(txn_state.iproto, 0, sizeof(txn_state.iproto));
-	memset(txn_state.fail, 0, sizeof(txn_state.fail));
 	memset(txn_state.join, 0, sizeof(txn_state.join));
 	memset(txn_state.wait_local, 0, sizeof(txn_state.wait_local));
-	memset(txn_state.id2index, BSYNC_MAX_HOSTS,
-		sizeof(txn_state.id2index));
-	memset(txn_state.recovery_fiber, 0, sizeof(txn_state.recovery_fiber));
+	memset(txn_state.id2index, BSYNC_MAX_HOSTS, sizeof(txn_state.id2index));
 
 	ev_async_init(&txn_process_event, bsync_txn_process);
 	ev_async_init(&bsync_process_event, bsync_process_loop);

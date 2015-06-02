@@ -24,31 +24,31 @@ print '-------------------------------------------------------------'
 replica_uuid = str(uuid.uuid4())
 
 ## Universal read permission is required to perform JOIN/SUBSCRIBE
-rows = list(server.sql.py_con.join(replica_uuid))
+rows = list(server.iproto.py_con.join(replica_uuid))
 print len(rows) == 1 and rows[0].return_message.find('Read access') >= 0 and \
     'ok' or 'not ok', '-', 'join without read permissions to universe'
-rows = list(server.sql.py_con.subscribe(cluster_uuid, replica_uuid))
+rows = list(server.iproto.py_con.subscribe(cluster_uuid, replica_uuid))
 print len(rows) == 1 and rows[0].return_message.find('Read access') >= 0 and \
     'ok' or 'not ok', '-', 'subscribe without read permissions to universe'
 
 ## Write permission to space `_cluster` is required to perform JOIN
 server.admin("box.schema.user.grant('guest', 'read', 'universe')")
-server.sql.py_con.close() # re-connect with new permissions
-rows = list(server.sql.py_con.join(replica_uuid))
+server.iproto.py_con.close() # re-connect with new permissions
+rows = list(server.iproto.py_con.join(replica_uuid))
 print len(rows) == 1 and rows[0].return_message.find('Write access') >= 0 and \
     'ok' or 'not ok', '-', 'join without write permissions to _cluster'
 
 def check_join(msg):
     ok = True
-    for resp in server.sql.py_con.join(replica_uuid):
+    for resp in server.iproto.py_con.join(replica_uuid):
         if resp.completion_status != 0:
             print 'not ok', '-', msg, resp.return_message
             ok = False
 
-    server.sql.py_con.close() # JOIN brokes protocol
+    server.iproto.py_con.close() # JOIN brokes protocol
     if not ok:
         return
-    tuples = server.sql.py_con.space('_cluster').select(replica_uuid, index = 1)
+    tuples = server.iproto.py_con.space('_cluster').select(replica_uuid, index = 1)
     if len(tuples) == 0:
         print 'not ok', '-', msg, 'missing entry in _cluster'
         return
@@ -58,28 +58,35 @@ def check_join(msg):
 
 ## JOIN with permissions
 server.admin("box.schema.user.grant('guest', 'write', 'space', '_cluster')")
-server.sql.py_con.close() # re-connect with new permissions
+server.iproto.py_con.close() # re-connect with new permissions
 server_id = check_join('join with granted permissions')
-server.sql.py_con.space('_cluster').delete(server_id)
+server.iproto.py_con.space('_cluster').delete(server_id)
 
 # JOIN with granted role
 server.admin("box.schema.user.revoke('guest', 'read', 'universe')")
 server.admin("box.schema.user.revoke('guest', 'write', 'space', '_cluster')")
 server.admin("box.schema.user.grant('guest', 'replication')")
-server.sql.py_con.close() # re-connect with new permissions
+server.iproto.py_con.close() # re-connect with new permissions
 server_id = check_join('join with granted role')
-server.sql.py_con.space('_cluster').delete(server_id)
+server.iproto.py_con.space('_cluster').delete(server_id)
 
 print '-------------------------------------------------------------'
 print 'gh-707: Master crashes on JOIN if it does not have snapshot files'
+print 'gh-480: If socket is closed while JOIN, replica wont reconnect'
 print '-------------------------------------------------------------'
 
 for k in glob.glob(os.path.join(server.vardir, '*.snap')):
     os.unlink(k)
 
-rows = list(server.sql.py_con.join(replica_uuid))
+# remember the number of servers in _cluster table
+server_count = len(server.iproto.py_con.space('_cluster').select(()))
+
+rows = list(server.iproto.py_con.join(replica_uuid))
 print len(rows) == 1 and rows[0].return_message.find('snapshot') >= 0 and \
     'ok' or 'not ok', '-', 'join without snapshots'
+
+print server_count == len(server.iproto.py_con.space('_cluster').select(())) and\
+    'ok' or 'not ok', '-', '_cluster does not changed after unsuccessful JOIN'
 
 server.admin("box.schema.user.revoke('guest', 'replication')")
 server.admin('box.snapshot()')
@@ -87,16 +94,17 @@ server.admin('box.snapshot()')
 print '-------------------------------------------------------------'
 print 'gh-434: Assertion if replace _cluster tuple'
 print '-------------------------------------------------------------'
+server.stop()
+script = server.script
+server.script = "replication/panic.lua"
+server.deploy()
 
 new_uuid = '8c7ff474-65f9-4abe-81a4-a3e1019bb1ae'
 
+# Check log message
 # Requires panic_on_wal_error = false
 server.admin("box.space._cluster:replace{{1, '{0}'}}".format(new_uuid))
 server.admin("box.info.server.uuid")
-
-# Check log message
-server.stop()
-server.start()
 
 line = "server UUID changed to " + new_uuid
 print "check log line for '%s'" % line
@@ -117,6 +125,7 @@ server.admin("box.space._cluster:replace{1, require('uuid').NULL:str()}")
 
 # Cleanup
 server.stop()
+server.script = script
 server.deploy()
 
 print '-------------------------------------------------------------'
@@ -165,6 +174,7 @@ replica.admin('box.info.vclock[%d]' % replica_id)
 replica.admin('box.info.vclock[%d]' % replica_id2)
 
 replica_id3 = 11
+# Tuple is read-only
 server.admin("box.space._cluster:update(%d, {{'=', 1, %d}})" %
     (replica_id2, replica_id3))
 replica.wait_lsn(master_id, master.get_lsn(master_id))
@@ -176,6 +186,28 @@ replica.admin('box.info.vclock[%d]' % replica_id2)
 replica.admin('box.info.vclock[%d]' % replica_id3)
 replica.stop()
 replica.cleanup(True)
+
+print '-------------------------------------------------------------'
+print 'gh-806: cant prune old replicas by deleting their server ids'
+print '-------------------------------------------------------------'
+
+# Rotate xlog
+master.restart()
+master.admin("box.space._schema:insert{'test', 1}")
+
+# Prune old replicas
+master.admin("cluster_len = box.space._cluster:len()")
+# Delete from _cluster for replicas with lsn=0 is safe
+master.admin('for id, lsn in pairs(box.info.vclock) do'
+             ' if id ~= box.info.server.id then box.space._cluster:delete{id} end '
+             'end');
+master.admin("box.space._cluster:len() < cluster_len")
+
+# Save a snapshot without removed replicas in vclock
+master.admin("box.snapshot()")
+
+# Master is not crashed then recovering xlog with {replica_id: 0} in header
+master.restart()
 
 # Cleanup
 sys.stdout.pop_filter()

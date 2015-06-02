@@ -1,3 +1,4 @@
+
 #include <bit/bit.h>
 #include <lib/msgpuck/msgpuck.h>
 #include "scramble.h"
@@ -6,8 +7,9 @@
 #include <box/lua/index.h>
 #include <box/lua/tuple.h>
 #include <box/lua/call.h>
+#include <box/sophia_engine.h>
 #include <lua/init.h>
-#include <tarantool.h>
+#include "main.h"
 #include "lua/bsdsocket.h"
 #include "lua/digest.h"
 #include "fiber.h"
@@ -30,12 +32,17 @@ void *ffi_symbols[] = {
 	(void *) tuple_rewind,
 	(void *) tuple_seek,
 	(void *) tuple_next,
-	(void *) tuple_ref_nothrow,
 	(void *) tuple_unref,
 	(void *) boxffi_index_len,
+	(void *) boxffi_index_bsize,
 	(void *) boxffi_index_random,
+	(void *) boxffi_index_get,
+	(void *) boxffi_index_min,
+	(void *) boxffi_index_max,
+	(void *) boxffi_index_count,
 	(void *) boxffi_index_iterator,
 	(void *) boxffi_tuple_update,
+	(void *) boxffi_iterator_next,
 	(void *) port_ffi_create,
 	(void *) port_ffi_destroy,
 	(void *) boxffi_select,
@@ -58,5 +65,6 @@ void *ffi_symbols[] = {
 	(void *) guava,
 	(void *) random_bytes,
 	(void *) fiber_time,
-	(void *) fiber_time64
+	(void *) fiber_time64,
+	(void *) sophia_schedule
 };

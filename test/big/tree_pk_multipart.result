@@ -1,7 +1,7 @@
 --
 -- Insert test
 --
-space = box.schema.create_space('tweedledum')
+space = box.schema.space.create('tweedledum')
 ---
 ...
 -- Multipart primary key (sender nickname, receiver nickname, message id)
@@ -269,11 +269,11 @@ space:delete{'Vincent', 'The Wolf!', 0}
 ...
 space:update({'Vincent', 'The Wolf!', 1}, {{ '=', 1, 'Updated' }, {'=', 5, 'New'}})
 ---
-- ['Updated', 'The Wolf!', 1, 'I said a please would be nice.', 'New']
+- error: Attempt to modify a tuple field which is part of index 'primary' in space
+    'tweedledum'
 ...
 space:update({'Updated', 'The Wolf!', 1}, {{ '=', 1, 'Vincent'}, { '#', 5, 1 }})
 ---
-- ['Vincent', 'The Wolf!', 1, 'I said a please would be nice.']
 ...
 -- Checking Vincent's last messages
 space.index['primary']:select({'Vincent', 'The Wolf!'})
@@ -463,7 +463,7 @@ space = nil
 ...
 -- Bug #1082356
 -- Space #19, https://bugs.launchpad.net/tarantool/+bug/1082356
-space = box.schema.create_space('tweedledum')
+space = box.schema.space.create('tweedledum')
 ---
 ...
 -- Multipart primary key (sender nickname, receiver nickname, message id)

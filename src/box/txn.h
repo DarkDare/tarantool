@@ -53,7 +53,9 @@ struct txn_stmt {
 
 struct txn {
 	/** Pre-allocated first statement. */
-	struct txn_stmt stmt;
+	struct txn_stmt first_stmt;
+	/** Pointer to the current statement, if any */
+	struct txn_stmt *stmt;
 	/** List of statements in a transaction. */
 	struct rlist stmts;
 	 /** Commit and rollback triggers */
@@ -69,7 +71,12 @@ struct txn {
 	bool autocommit;
 	/** Engine involved in multi-statement transaction. */
 	Engine *engine;
-	/** Triggers on fiber yield and stop to abort transaction for in-memory engine */
+	/** Engine-specific transaction data */
+	void *engine_tx;
+	/**
+	 * Triggers on fiber yield and stop to abort transaction
+	 * for in-memory engine.
+	 */
 	struct trigger fiber_on_yield, fiber_on_stop;
 };
 
@@ -79,6 +86,24 @@ in_txn()
 {
 	return (struct txn *) fiber_get_key(fiber(), FIBER_KEY_TXN);
 }
+
+/**
+ * Start a transaction explicitly.
+ * @pre no transaction is active
+ */
+struct txn *
+txn_begin(bool autocommit);
+
+/**
+ * Commit a transaction.
+ * @pre txn == in_txn()
+ */
+void
+txn_commit(struct txn *txn);
+
+/** Rollback a transaction, if any. */
+void
+txn_rollback();
 
 /**
  * Start a new statement. If no current transaction,
@@ -91,8 +116,14 @@ txn_begin_stmt(struct request *request, struct space *space);
  * End a statement. In autocommit mode, end
  * the current transaction as well.
  */
-void
-txn_commit_stmt(struct txn *txn, struct port *port);
+static inline void
+txn_commit_stmt(struct txn *txn)
+{
+	if (txn->autocommit)
+		txn_commit(txn);
+	else
+		txn->stmt = NULL;
+}
 
 /**
  * Rollback a statement. In autocommit mode,
@@ -100,31 +131,6 @@ txn_commit_stmt(struct txn *txn, struct port *port);
  */
 void
 txn_rollback_stmt();
-
-/**
- * Start a transaction explicitly.
- * @pre no transaction is active
- */
-struct txn *
-txn_begin(bool autocommit);
-
-/**
- * Commit a transaction. txn_finish must be called after that.
- * @pre txn == in_txn()
- */
-void
-txn_commit(struct txn *txn);
-
-/**
- * Finish a transaction. Must be called after txn_commit.
- * @pre txn == in_txn()
- */
-void
-txn_finish(struct txn *txn);
-
-/** Rollback a transaction, if any. */
-void
-txn_rollback();
 
 /**
  * Raise an error if this is a multi-statement
@@ -143,7 +149,7 @@ txn_replace(struct txn *txn, struct space *space,
 static inline struct txn_stmt *
 txn_stmt(struct txn *txn)
 {
-	return rlist_last_entry(&txn->stmts, struct txn_stmt, next);
+	return txn->stmt;
 }
 
 /**
@@ -159,13 +165,6 @@ extern "C" {
  */
 int
 boxffi_txn_begin();
-
-/**
- * @retval 0 - success
- * @retval -1 - commit failed
- */
-int
-boxffi_txn_commit();
 
 void
 boxffi_txn_rollback();

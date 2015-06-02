@@ -1,198 +1,197 @@
-function f() box.schema.create_space('test', { id = 0 }) end
+net_box = require('net.box')
+---
+...
+s = box.schema.space.create('test', { id = 0 })
 ---
 ...
 box.schema.user.create('test', { password = 'test' })
 ---
 ...
-box.schema.func.create('f')
+box.schema.user.grant('test', 'execute,read,write', 'universe')
 ---
 ...
-box.schema.user.grant('test', 'Write', 'space', '_space')
+conn = net_box:new('test:test@' .. box.cfg.listen)
 ---
 ...
-box.schema.user.grant('test', 'Execute', 'function', 'f')
----
-...
-call f()
+space = conn.space.test
 ---
 ...
 index = box.space.test:create_index('primary', { type = 'hash' })
 ---
 ...
-ping
+conn:ping()
 ---
-- ok
+- true
 ...
-select * from t0
+-- xxx: bug  currently selects no rows
+space:select{}
 ---
-- error:
-    errcode: ER_KEY_FIELD_TYPE
-    errmsg: Supplied key type of part 0 does not match index part type: expected NUM
+- []
 ...
-insert into t0 values (1, 'I am a tuple')
+space:insert{1, 'I am a tuple'}
 ---
 - [1, 'I am a tuple']
 ...
-select * from t0 where k0 = 1
+space:select{1}
 ---
-- [1, 'I am a tuple']
+- - [1, 'I am a tuple']
 ...
-select * from t0 where k0 = 0
+-- currently there is no way to find out how many records
+-- a space contains 
+space:select{0}
+---
+- []
+...
+space:select{2}
+---
+- []
+...
+--# stop server default
+--# start server default
+net_box = require('net.box')
 ---
 ...
-select * from t0 where k0 = 2
+conn = net_box:new('test:test@' .. box.cfg.listen)
 ---
 ...
-select * from t0 where k0 = 1
+space = conn.space.test
 ---
-- [1, 'I am a tuple']
+...
+space:select{1}
+---
+- - [1, 'I am a tuple']
 ...
 box.snapshot()
 ---
 - ok
 ...
-select * from t0 where k0 = 1
+space:select{1}
+---
+- - [1, 'I am a tuple']
+...
+--# stop server default
+--# start server default
+net_box = require('net.box')
+---
+...
+conn = net_box:new('test:test@' .. box.cfg.listen)
+---
+...
+space = conn.space.test
+---
+...
+space:select{1}
+---
+- - [1, 'I am a tuple']
+...
+space:delete{1}
 ---
 - [1, 'I am a tuple']
 ...
-select * from t0 where k0 = 1
+space:select{1}
 ---
-- [1, 'I am a tuple']
+- []
 ...
-delete from t0 where k0 = 1
----
-- [1, 'I am a tuple']
-...
-select * from t0 where k0 = 1
+-- xxx: update comes through, returns 0 rows affected 
+space:update(1, {{'=', 2, 'I am a new tuple'}})
 ---
 ...
-update t0 set k1 = 'I am a new tuple' where k0=1
+-- nothing is selected, since nothing was there
+space:select{1}
 ---
+- []
 ...
-select * from t0 where k0=1
----
-...
-insert into t0 values (1, 'I am a new tuple')
+space:insert{1, 'I am a new tuple'}
 ---
 - [1, 'I am a new tuple']
 ...
-select * from t0 where k0 = 1
+space:select{1}
 ---
-- [1, 'I am a new tuple']
+- - [1, 'I am a new tuple']
 ...
-update t0 set k1 = 'I am the newest tuple' where k0=1
----
-- [1, 'I am the newest tuple']
-...
-select * from t0 where k0 = 1
+space:update(1, {{'=', 2, 'I am the newest tuple'}})
 ---
 - [1, 'I am the newest tuple']
 ...
-update t0 set k1 = 'Huh', k2 = 'I am a new field! I was added via append' where k0=1
+space:select{1}
+---
+- - [1, 'I am the newest tuple']
+...
+-- this is correct, can append field to tuple
+space:update(1, {{'=', 2, 'Huh'}, {'=', 3, 'I am a new field! I was added via append'}})
 ---
 - [1, 'Huh', 'I am a new field! I was added via append']
 ...
-select * from t0 where k0 = 1
+space:select{1}
 ---
-- [1, 'Huh', 'I am a new field! I was added via append']
+- - [1, 'Huh', 'I am a new field! I was added via append']
 ...
-update t0 set k1 = 'Huh', k1000 = 'invalid field' where k0=1
+-- this is illegal
+space:update(1, {{'=', 2, 'Huh'}, {'=', 1001, 'invalid field'}})
 ---
-- error:
-    errcode: ER_NO_SUCH_FIELD
-    errmsg: Field 1000 was not found in the tuple
+- error: Field 1001 was not found in the tuple
 ...
-select * from t0 where k0 = 1
+space:select{1}
 ---
-- [1, 'Huh', 'I am a new field! I was added via append']
+- - [1, 'Huh', 'I am a new field! I was added via append']
 ...
-replace into t0 values (1, 'I am a new tuple', 'stub')
+space:replace{1, 'I am a new tuple', 'stub'}
 ---
 - [1, 'I am a new tuple', 'stub']
 ...
-update t0 set k1 = 'Huh', k2 = 'Oh-ho-ho' where k0=1
+space:update(1, {{'=', 2, 'Huh'}, {'=', 3, 'Oh-ho-ho'}})
 ---
 - [1, 'Huh', 'Oh-ho-ho']
 ...
-select * from t0 where k0 = 1
+space:select{1}
 ---
-- [1, 'Huh', 'Oh-ho-ho']
+- - [1, 'Huh', 'Oh-ho-ho']
 ...
-update t0 set k1 = '', k2 = '' where k0=1
----
-- [1, '', '']
-...
-select * from t0 where k0 = 1
+-- check empty strings
+space:update(1, {{'=', 2, ''}, {'=', 3, ''}})
 ---
 - [1, '', '']
 ...
-update t0 set k1 = 2, k2 = 3 where k0=1
+space:select{1}
+---
+- - [1, '', '']
+...
+-- check type change 
+space:update(1, {{'=', 2, 2}, {'=', 3, 3}})
 ---
 - [1, 2, 3]
 ...
-select * from t0 where k0 = 1
+space:select{1}
 ---
-- [1, 2, 3]
+- - [1, 2, 3]
 ...
-insert into t0 values (0)
----
-- [0]
-...
-select * from t0 where k0=0
+-- check limits
+space:insert{0}
 ---
 - [0]
 ...
-insert into t0 values (4294967295)
+space:select{0}
 ---
-- [4294967295]
+- - [0]
 ...
-select * from t0 where k0=4294967295
+space:select{4294967295}
 ---
-- [4294967295]
+- []
 ...
-delete from t0 where k0=0
+-- cleanup 
+space:delete(0)
 ---
 - [0]
 ...
-delete from t0 where k0=4294967295
+space:delete(4294967295)
 ---
-- [4294967295]
 ...
-#
-# A test case for: http://bugs.launchpad.net/bugs/712456
-# Verify that when trying to access a non-existing or
-# very large space id, no crash occurs.
-#
-
-select * from t1 where k0 = 0
----
-- error:
-    errcode: ER_NO_SUCH_SPACE
-    errmsg: Space '1' does not exist
-...
-select * from t65537 where k0 = 0
----
-- error:
-    errcode: ER_NO_SUCH_SPACE
-    errmsg: Space '65537' does not exist
-...
-select * from t4294967295 where k0 = 0
----
-- error:
-    errcode: ER_NO_SUCH_SPACE
-    errmsg: Space '4294967295' does not exist
-...
-box.space[0]:drop()
+box.space.test:drop()
 ---
 ...
 box.schema.user.drop('test')
 ---
 ...
-#
-# A test case for: http://bugs.launchpad.net/bugs/716683
-# Admin console should not stall on unknown command.
-
-show status
+space = nil
 ---
-- error: '[string "show status"]:1: ''='' expected near ''status'''
 ...

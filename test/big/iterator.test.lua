@@ -2,7 +2,7 @@ dofile('utils.lua')
 
 # Tree single-part unique
 
-space = box.schema.create_space('tweedledum')
+space = box.schema.space.create('tweedledum')
 idx1 = space:create_index('primary', { type = 'tree', parts = {1, 'str'}, unique = true})
 -- Tree single-part non-unique
 idx2 = space:create_index('i1', { type = 'tree', parts = {2, 'str'}, unique = false})
@@ -165,7 +165,8 @@ space.index['primary']:pairs(function() end, { iterator = box.index.EQ })
 -- Check that iterators successfully invalidated when index deleted
 gen, param, state = space.index['i1']:pairs(nil, { iterator = box.index.GE })
 index_space = box.space[box.schema.INDEX_ID]
-index_space:delete{space.id, space.index['i1'].id}
+_ = index_space:delete{space.id, space.index['i1'].id}
+type(_)
 gen(param, state)
 
 space:drop()
@@ -175,7 +176,7 @@ space:drop()
 -- Iterator safety after changing schema
 -------------------------------------------------------------------------------
 
-space = box.schema.create_space('test', {temporary=true})
+space = box.schema.space.create('test', {temporary=true})
 idx1 = space:create_index('primary', {type='HASH',unique=true})
 idx2 = space:create_index('t1', {type='TREE',unique=true})
 idx3 = space:create_index('t2', {type='TREE',unique=true})
@@ -183,14 +184,21 @@ idx3 = space:create_index('t2', {type='TREE',unique=true})
 box.space.test:insert{0}
 box.space.test:insert{1}
 
-gen, param, state = space.index.t1:pairs({}, {iterator = box.index.ALL})
-gen(param, state)
+gen1, param1, state1 = space.index.t1:pairs({}, {iterator = box.index.ALL})
+gen1(param1, state1)
+
+gen2, param2, state2 = space.index.t2:pairs({}, {iterator = box.index.ALL})
+gen2(param2, state2)
 
 id = space.index.t1.id
 box.schema.index.drop(space.id, id)
-box.schema.index.alter(space.id, space.index.t2.id, {id = id})
 
-gen(param, state)
+gen1(param1, state1)
+gen2(param2, state2)
+
+gen2, param2, state2 = space.index.t2:pairs({}, {iterator = box.index.ALL})
+gen2(param2, state2)
+gen2(param2, state2)
 
 space:drop()
 
@@ -199,7 +207,7 @@ space:drop()
 -- Iterator is not checked for wrong type; accept lowercase iterator
 -------------------------------------------------------------------------------
 
-space = box.schema.create_space('test', {temporary=true})
+space = box.schema.space.create('test', {temporary=true})
 idx1 = space:create_index('primary', {type='TREE',unique=true})
 space:insert{0}
 space:insert{1}
@@ -221,3 +229,25 @@ space:select({}, {iterator = 'mistake'})
 
 space:drop()
 
+
+-------------------------------------------------------------------------------
+--  Restore GE iterator for HASH https://github.com/tarantool/tarantool/issues/836
+-------------------------------------------------------------------------------
+space = box.schema.space.create('test', {temporary=true})
+idx1 = space:create_index('primary', {type='hash',unique=true})
+
+for i = 0,5 do space:insert{i} end
+
+space:select(2)
+space:select(5, {iterator="GE"})
+space:select(nil, {iterator="GE"})
+space:select(5, {iterator="GT"})
+l = space:select(nil, {limit=2, iterator="GT"})
+l
+l = space:select(l[#l][1], {limit=2, iterator="GT"})
+l
+l = space:select(l[#l][1], {limit=2, iterator="GT"})
+l
+l = space:select(l[#l][1], {limit=2, iterator="GT"})
+l
+space:drop()

@@ -29,6 +29,7 @@
 #include "memtx_tree.h"
 #include "tuple.h"
 #include "space.h"
+#include "schema.h" /* space_cache_find() */
 #include "errinj.h"
 #include "memory.h"
 #include "fiber.h"
@@ -51,7 +52,7 @@ tree_index_compare(const tuple *a, const tuple *b, struct key_def *key_def)
 	return r;
 }
 int
-tree_index_compare_key(const tuple *a, const key_data *key_data,
+tree_index_compare_key(const tuple *a, const struct key_data *key_data,
 		       struct key_def *key_def)
 {
 	return tuple_compare_with_key(a, key_data->key, key_data->part_count,
@@ -203,7 +204,7 @@ MemtxTree::size() const
 }
 
 size_t
-MemtxTree::memsize() const
+MemtxTree::bsize() const
 {
 	return bps_tree_index_mem_used(&tree);
 }
@@ -237,9 +238,9 @@ MemtxTree::replace(struct tuple *old_tuple, struct tuple *new_tuple,
 		struct tuple *dup_tuple = NULL;
 
 		/* Try to optimistically replace the new_tuple. */
-		bool tree_res =
+		int tree_res =
 		bps_tree_index_insert(&tree, new_tuple, &dup_tuple);
-		if (!tree_res) {
+		if (tree_res) {
 			tnt_raise(ClientError, ER_MEMORY_ISSUE,
 				  BPS_TREE_EXTENT_SIZE, "MemtxTree", "replace");
 		}
@@ -250,7 +251,9 @@ MemtxTree::replace(struct tuple *old_tuple, struct tuple *new_tuple,
 			bps_tree_index_delete(&tree, new_tuple);
 			if (dup_tuple)
 				bps_tree_index_insert(&tree, dup_tuple, 0);
-			tnt_raise(ClientError, errcode, index_id(this));
+			struct space *sp = space_cache_find(key_def->space_id);
+			tnt_raise(ClientError, errcode, index_name(this),
+				  space_name(sp));
 		}
 		if (dup_tuple)
 			return dup_tuple;
@@ -394,5 +397,29 @@ MemtxTree::endBuild()
 	build_array = 0;
 	build_array_size = 0;
 	build_array_alloc_size = 0;
+}
+
+/**
+ * Create a read view for iterator so further index modifications
+ * will not affect the iterator iteration.
+ */
+void
+MemtxTree::createReadViewForIterator(struct iterator *iterator)
+{
+	struct tree_iterator *it = tree_iterator(iterator);
+	struct bps_tree_index *tree = (struct bps_tree_index *)it->tree;
+	bps_tree_index_itr_freeze(tree, &it->bps_tree_iter);
+}
+
+/**
+ * Destroy a read view of an iterator. Must be called for iterators,
+ * for which createReadViewForIterator was called.
+ */
+void
+MemtxTree::destroyReadViewForIterator(struct iterator *iterator)
+{
+	struct tree_iterator *it = tree_iterator(iterator);
+	struct bps_tree_index *tree = (struct bps_tree_index *)it->tree;
+	bps_tree_index_itr_destroy(tree, &it->bps_tree_iter);
 }
 

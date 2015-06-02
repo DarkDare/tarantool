@@ -5,7 +5,7 @@
 box.cfg
 1	snapshot_count:6
 2	pid_file:box.pid
-3	slab_alloc_factor:2
+3	slab_alloc_factor:1.1
 4	slab_alloc_maximal:1048576
 5	background:false
 6	logger:tarantool.log
@@ -14,18 +14,18 @@ box.cfg
 9	logger_nonblock:true
 10	snap_dir:.
 11	coredump:false
-12	slab_alloc_minimal:64
+12	slab_alloc_minimal:16
 13	sophia_dir:.
 14	wal_mode:write
 15	rows_per_wal:500000
 16	panic_on_snap_error:true
-17	panic_on_wal_error:false
+17	panic_on_wal_error:true
 18	wal_dir:.
 19	log_level:5
 20	readahead:16320
 21	too_long_threshold:0.5
 22	snapshot_period:0
-23	wal_dir_rescan_delay:0.1
+23	wal_dir_rescan_delay:2
 --
 -- Test insert from detached fiber
 --

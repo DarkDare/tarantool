@@ -1,10 +1,13 @@
 dofile('utils.lua')
 ---
 ...
-s0 = box.schema.create_space('tweedledum')
+s0 = box.schema.space.create('tweedledum')
 ---
 ...
 i0 = s0:create_index('primary', { type = 'tree', parts = {1, 'num'}, unique = true })
+---
+...
+bsize = i0:bsize()
 ---
 ...
 -- integer keys
@@ -23,6 +26,10 @@ s0:insert{2, 'tuple 2'}
 box.snapshot()
 ---
 - ok
+...
+i0:bsize() > bsize
+---
+- true
 ...
 s0:insert{3, 'tuple 3'}
 ---
@@ -57,23 +64,23 @@ s0:delete{3}
 -- https://bugs.launchpad.net/tarantool/+bug/1072624
 s0:insert{'xxxxxxx'}
 ---
-- error: 'Tuple field 0 type does not match one required by operation: expected NUM'
+- error: 'Tuple field 1 type does not match one required by operation: expected NUM'
 ...
 s0:insert{''}
 ---
-- error: 'Tuple field 0 type does not match one required by operation: expected NUM'
+- error: 'Tuple field 1 type does not match one required by operation: expected NUM'
 ...
 s0:insert{'12'}
 ---
-- error: 'Tuple field 0 type does not match one required by operation: expected NUM'
+- error: 'Tuple field 1 type does not match one required by operation: expected NUM'
 ...
-s1 = box.schema.create_space('tweedledee')
+s1 = box.schema.space.create('tweedledee')
 ---
 ...
 i1 = s1:create_index('primary', { type = 'tree', parts = {1, 'str'}, unique = true })
 ---
 ...
-s2 = box.schema.create_space('alice')
+s2 = box.schema.space.create('alice')
 ---
 ...
 i2 = s2:create_index('primary', { type = 'tree', parts = {1, 'str'}, unique = true })
@@ -364,7 +371,7 @@ s0.index['i3']:select{10}
 -- TupleFound (primary key)
 s0:insert{1, 10, 10, 10}
 ---
-- error: Duplicate key exists in unique index 0
+- error: Duplicate key exists in unique index 'primary' in space 'tweedledum'
 ...
 s0.index['primary']:get{10}
 ---
@@ -409,7 +416,7 @@ s0.index['i3']:select{10}
 -- TupleFound (key #1)
 s0:insert{10, 0, 10, 10}
 ---
-- error: Duplicate key exists in unique index 0
+- error: Duplicate key exists in unique index 'primary' in space 'tweedledum'
 ...
 s0.index['primary']:get{10}
 ---
@@ -434,7 +441,7 @@ s0.index['i1']:select{0}
 -- TupleFound (key #1)
 s0:replace{2, 0, 10, 10}
 ---
-- error: Duplicate key exists in unique index 1
+- error: Duplicate key exists in unique index 'i1' in space 'tweedledum'
 ...
 s0.index['primary']:get{10}
 ---
@@ -459,7 +466,7 @@ s0.index['i1']:select{0}
 -- TupleFound (key #3)
 s0:insert{10, 10, 10, 0}
 ---
-- error: Duplicate key exists in unique index 0
+- error: Duplicate key exists in unique index 'primary' in space 'tweedledum'
 ...
 s0.index['primary']:get{10}
 ---
@@ -484,7 +491,7 @@ s0.index['i3']:select{0}
 -- TupleFound (key #3)
 s0:replace{2, 10, 10, 0}
 ---
-- error: Duplicate key exists in unique index 1
+- error: Duplicate key exists in unique index 'i1' in space 'tweedledum'
 ...
 s0.index['primary']:get{10}
 ---

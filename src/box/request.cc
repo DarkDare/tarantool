@@ -64,7 +64,13 @@ execute_replace(struct request *request, struct port *port)
 	enum dup_replace_mode mode = dup_replace_mode(request->type);
 
 	txn_replace(txn, space, NULL, new_tuple, mode);
-	txn_commit_stmt(txn, port);
+	txn_commit_stmt(txn);
+	/*
+	 * Adding result to port must be after possible WAL write.
+	 * The reason is that any yield between port_add_tuple and port_eof
+	 * calls could lead to sending not finished response to iproto socket.
+	 */
+	port_add_tuple(port, new_tuple);
 }
 
 static void
@@ -82,9 +88,10 @@ execute_update(struct request *request, struct port *port)
 	struct tuple *old_tuple = pk->findByKey(key, part_count);
 
 	if (old_tuple == NULL) {
-		txn_commit_stmt(txn, port);
+		txn_commit_stmt(txn);
 		return;
 	}
+	TupleGuard old_guard(old_tuple);
 
 	/* Update the tuple. */
 	struct tuple *new_tuple = tuple_update(space->format,
@@ -92,11 +99,19 @@ execute_update(struct request *request, struct port *port)
 					       &fiber()->gc,
 					       old_tuple, request->tuple,
 					       request->tuple_end,
-					       request->field_base);
+					       request->index_base);
 	TupleGuard guard(new_tuple);
 	space_validate_tuple(space, new_tuple);
-	txn_replace(txn, space, old_tuple, new_tuple, DUP_INSERT);
-	txn_commit_stmt(txn, port);
+	if (! engine_auto_check_update(space->handler->engine->flags))
+		space_check_update(space, old_tuple, new_tuple);
+	txn_replace(txn, space, old_tuple, new_tuple, DUP_REPLACE);
+	txn_commit_stmt(txn);
+	/*
+	 * Adding result to port must be after possible WAL write.
+	 * The reason is that any yield between port_add_tuple and port_eof
+	 * calls could lead to sending not finished response to iproto socket.
+	 */
+	port_add_tuple(port, new_tuple);
 }
 
 static void
@@ -113,12 +128,20 @@ execute_delete(struct request *request, struct port *port)
 	uint32_t part_count = mp_decode_array(&key);
 	primary_key_validate(pk->key_def, key, part_count);
 	struct tuple *old_tuple = pk->findByKey(key, part_count);
-
-	if (old_tuple != NULL)
-		txn_replace(txn, space, old_tuple, NULL, DUP_REPLACE_OR_INSERT);
-	txn_commit_stmt(txn, port);
+	if (old_tuple == NULL) {
+		txn_commit_stmt(txn);
+		return;
+	}
+	TupleGuard old_guard(old_tuple);
+	txn_replace(txn, space, old_tuple, NULL, DUP_REPLACE_OR_INSERT);
+	txn_commit_stmt(txn);
+	/*
+	 * Adding result to port must be after possible WAL write.
+	 * The reason is that any yield between port_add_tuple and port_eof
+	 * calls could lead to sending not finished response to iproto socket.
+	 */
+	port_add_tuple(port, old_tuple);
 }
-
 
 static void
 execute_select(struct request *request, struct port *port)
@@ -137,16 +160,17 @@ execute_select(struct request *request, struct port *port)
 	enum iterator_type type = (enum iterator_type) request->iterator;
 
 	const char *key = request->key;
+
 	uint32_t part_count = key ? mp_decode_array(&key) : 0;
 
 	struct iterator *it = index->position();
 	key_validate(index->key_def, type, key, part_count);
 	index->initIterator(it, type, key, part_count);
-	auto iterator_guard =
-		make_scoped_guard([=] { iterator_close(it); });
+	IteratorGuard it_guard(it);
 
 	struct tuple *tuple;
 	while ((tuple = it->next(it)) != NULL) {
+		TupleGuard tuple_gc(tuple);
 		if (offset > 0) {
 			offset--;
 			continue;
@@ -166,7 +190,6 @@ execute_select(struct request *request, struct port *port)
 void
 request_create(struct request *request, uint32_t type)
 {
-
 	memset(request, 0, sizeof(*request));
 	request->type = type;
 }
@@ -227,6 +250,9 @@ error:
 		case IPROTO_OFFSET:
 			request->offset = mp_decode_uint(&value);
 			break;
+		case IPROTO_INDEX_BASE:
+			request->index_base = mp_decode_uint(&value);
+			break;
 		case IPROTO_LIMIT:
 			request->limit = mp_decode_uint(&value);
 			break;
@@ -281,6 +307,11 @@ request_encode(struct request *request, struct iovec *iov)
 		pos = mp_encode_uint(pos, IPROTO_KEY);
 		memcpy(pos, request->key, key_len);
 		pos += key_len;
+		map_size++;
+	}
+	if (request->index_base) { /* only for UPDATE */
+		pos = mp_encode_uint(pos, IPROTO_INDEX_BASE);
+		pos = mp_encode_uint(pos, request->index_base);
 		map_size++;
 	}
 	if (request->tuple) {

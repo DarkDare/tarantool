@@ -6,14 +6,18 @@ dofile('utils.lua')
 -------------------------------------------------------------------------------
 -- 32-bit hash insert fields tests
 -------------------------------------------------------------------------------
-hash = box.schema.create_space('tweedledum')
+hash = box.schema.space.create('tweedledum')
 tmp = hash:create_index('primary', { type = 'hash', parts = {1, 'num'}, unique = true })
+
+bsize = tmp:bsize()
 
 -- Insert valid fields
 hash:insert{0, 'value1 v1.0', 'value2 v1.0'}
 hash:insert{1, 'value1 v1.0', 'value2 v1.0'}
 hash:insert{2, 'value1 v1.0', 'value2 v1.0'}
 hash:insert{3, 'value1 v1.0', 'value2 v1.0'}
+
+tmp:bsize() > bsize
 
 -- Insert invalid fields
 hash:insert{'invalid key', 'value1 v1.0', 'value2 v1.0'}
@@ -288,3 +292,18 @@ hash.index['field3']:get{10}
 hash.index['field3']:get{0}
 
 hash:drop()
+
+hash = box.schema.space.create('tweedledum')
+hi = hash:create_index('primary', { type = 'hash', parts = {1, 'num'}, unique = true })
+hash:insert{0}
+hash:insert{16}
+for _, tuple in hi:pairs(nil, {iterator = box.index.ALL}) do hash:delete{tuple[1]} end
+hash:drop()
+
+-- 
+-- gh-616 "1-based indexing and 0-based error message
+--
+_ = box.schema.create_space('test')
+_ = box.space.test:create_index('i',{parts={1,'STR'}})
+box.space.test:insert{1}
+box.space.test:drop()

@@ -34,27 +34,35 @@ struct SophiaEngine: public Engine {
 	SophiaEngine();
 	virtual void init();
 	virtual Handler *open();
-	virtual Index *createIndex(struct key_def*);
+	virtual Index *createIndex(struct key_def *);
 	virtual void dropIndex(Index*);
-	virtual void keydefCheck(struct key_def*f);
-	virtual void begin(struct txn*, struct space*);
-	virtual void commit(struct txn*);
-	virtual void rollback(struct txn*);
-	virtual void begin_recover_snapshot(int64_t);
-	virtual void end_recover_snapshot();
-	virtual void end_recovery();
-	virtual int begin_checkpoint(int64_t);
-	virtual int wait_checkpoint();
-	virtual void commit_checkpoint();
-	virtual void abort_checkpoint();
+	virtual void keydefCheck(struct space *space, struct key_def *f);
+	virtual void beginStatement(struct txn *txn);
+	virtual void prepare(struct txn *txn);
+	virtual void commit(struct txn *txn);
+	virtual void rollbackStatement(struct txn_stmt *stmt);
+	virtual void rollback(struct txn *txn);
+	virtual void beginJoin();
+	virtual void recoverToCheckpoint(int64_t);
+	virtual void endRecovery();
+	virtual void join(Relay*);
+	virtual int beginCheckpoint(int64_t);
+	virtual int waitCheckpoint();
+	virtual void commitCheckpoint();
+	virtual void abortCheckpoint();
 	void *env;
-	void *tx;
 private:
 	int64_t m_prev_checkpoint_lsn;
 	int64_t m_checkpoint_lsn;
+public:
+	int recovery_complete;
 };
 
 void sophia_info(void (*)(const char*, const char*, void*), void*);
 void sophia_raise(void*);
+
+extern "C" {
+int sophia_schedule(void);
+}
 
 #endif /* TARANTOOL_BOX_SOPHIA_ENGINE_H_INCLUDED */

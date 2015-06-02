@@ -42,6 +42,11 @@
 #include "cluster.h" /* for cluster_set_uuid() */
 #include "session.h" /* to fetch the current user. */
 
+/**
+ * Lock of scheme modification
+ */
+struct latch schema_lock = LATCH_INITIALIZER(schema_lock);
+
 /** _space columns */
 #define ID               0
 #define UID              1
@@ -173,18 +178,6 @@ space_def_create_from_tuple(struct space_def *def, struct tuple *tuple,
 
 	space_def_init_flags(def, tuple);
 	space_def_check(def, namelen, engine_namelen, errcode);
-	if (errcode != ER_ALTER_SPACE &&
-	    def->id >= SC_SYSTEM_ID_MIN && def->id < SC_SYSTEM_ID_MAX) {
-		say_warn("\n"
-"*******************************************************\n"
-"* Creating a space with a reserved id %3u.            *\n"
-"* Ids in range %3u-%3u may be used for a system space *\n"
-"* the future. Assuming you know what you're doing.    *\n"
-"*******************************************************",
-			 (unsigned) def->id,
-			 (unsigned) SC_SYSTEM_ID_MIN,
-			 (unsigned) SC_SYSTEM_ID_MAX);
-	}
 	access_check_ddl(def->uid);
 }
 
@@ -290,13 +283,6 @@ static void
 alter_space_commit(struct trigger *trigger, void * /* event */)
 {
 	struct alter_space *alter = (struct alter_space *) trigger->data;
-#if 0
-	/*
-	 * Clear the lock first - should there be an
-	 * exception/bug, the lock must not be left around.
-	 */
-	space_unset_on_replace(space, alter);
-#endif
 	/*
 	 * If an index is unchanged, all its properties, including
 	 * ID are intact. Move this index here. If an index is
@@ -423,7 +409,7 @@ alter_space_do(struct txn *txn, struct alter_space *alter,
 	 * Plus, implicit locks are evil.
 	 */
 	if (space->on_replace == space_alter_on_replace)
-		tnt_raise(ER_ALTER, space_id(space));
+		tnt_raise(ER_ALTER_SPACE, space_name(space));
 #endif
 	alter->old_space = old_space;
 	alter->space_def = old_space->def;
@@ -444,18 +430,18 @@ alter_space_do(struct txn *txn, struct alter_space *alter,
 		op->alter_def(alter);
 	/*
 	 * Create a new (empty) space for the new definition.
-	 * Sic: the space engine is not the same yet, the
-	 * triggers are not set.
+	 * Sic: the triggers are not moved over yet.
 	 */
 	alter->new_space = space_new(&alter->space_def, &alter->key_list);
 	/*
-	 * Copy the engine, the new space is at the same recovery
-	 * phase as the old one. Do it before performing the alter,
-	 * since engine.recover does different things depending on
-	 * the recovery phase.
+	 * Copy the replace function, the new space is at the same recovery
+	 * phase as the old one. This hack is especially necessary for
+	 * system spaces, which may be altered in some row in the
+	 * snapshot/xlog, but needs to continue staying "fully
+	 * built".
 	 */
-	alter->new_space->handler->recovery =
-		alter->old_space->handler->recovery;
+	alter->new_space->handler->replace =
+		alter->old_space->handler->replace;
 
 	memcpy(alter->new_space->access, alter->old_space->access,
 	       sizeof(alter->old_space->access));
@@ -498,38 +484,35 @@ ModifySpace::prepare(struct alter_space *alter)
 {
 	if (def.id != space_id(alter->old_space))
 		tnt_raise(ClientError, ER_ALTER_SPACE,
-			  (unsigned) space_id(alter->old_space),
+			  space_name(alter->old_space),
 			  "space id is immutable");
 
 	if (strcmp(def.engine_name, alter->old_space->def.engine_name) != 0)
 		tnt_raise(ClientError, ER_ALTER_SPACE,
-			  (unsigned) space_id(alter->old_space),
+			  space_name(alter->old_space),
 			  "can not change space engine");
-
-	engine_recovery *recovery =
-		&alter->old_space->handler->recovery;
 
 	if (def.field_count != 0 &&
 	    def.field_count != alter->old_space->def.field_count &&
-	    recovery->state != READY_NO_KEYS &&
+	    space_index(alter->old_space, 0) != NULL &&
 	    space_size(alter->old_space) > 0) {
 
 		tnt_raise(ClientError, ER_ALTER_SPACE,
-			  (unsigned) def.id,
+			  space_name(alter->old_space),
 			  "can not change field count on a non-empty space");
 	}
 
 	Engine *engine = alter->old_space->handler->engine;
 	if (def.temporary && !engine_can_be_temporary(engine->flags)) {
 		tnt_raise(ClientError, ER_ALTER_SPACE,
-			  (unsigned) def.id,
+			  space_name(alter->old_space),
 			  "space does not support temporary flag");
 	}
 	if (def.temporary != alter->old_space->def.temporary &&
-	    recovery->state != READY_NO_KEYS &&
+	    space_index(alter->old_space, 0) != NULL &&
 	    space_size(alter->old_space) > 0) {
 		tnt_raise(ClientError, ER_ALTER_SPACE,
-			  (unsigned) space_id(alter->old_space),
+			  space_name(alter->old_space),
 			  "can not switch temporary flag on a non-empty space");
 	}
 }
@@ -583,24 +566,24 @@ DropIndex::alter(struct alter_space *alter)
 	 */
 	if (space_is_system(alter->new_space))
 		tnt_raise(ClientError, ER_LAST_DROP,
-			  space_id(alter->new_space));
+			  space_name(alter->new_space));
 	/*
 	 * Can't drop primary key before secondary keys.
 	 */
 	if (alter->new_space->index_count) {
 		tnt_raise(ClientError, ER_DROP_PRIMARY_KEY,
-			  (unsigned) alter->new_space->def.id);
+			  space_name(alter->new_space));
 	}
 	/*
-	 * OK to drop the primary key. Put the space back to
-	 * 'READY_NO_KEYS' state, so that:
+	 * OK to drop the primary key. Inform the engine about it,
+	 * since it may have to reset handler->replace function,
+	 * so that:
 	 * - DML returns proper errors rather than crashes the
-	 *   server (thanks to engine_no_keys.replace),
-	 * - When a new primary key is finally added, the space
-	 *   can be put back online properly with
-	 *   engine_no_keys.recover.
+	 *   server
+	 * - when a new primary key is finally added, the space
+	 *   can be put back online properly.
 	 */
-	alter->new_space->handler->initRecovery();
+	alter->new_space->handler->engine->dropPrimaryKey(alter->new_space);
 }
 
 void
@@ -779,20 +762,14 @@ on_replace_in_old_space(struct trigger *trigger, void *event)
  * anyway, so there is no need to fully populate index with data,
  * it is done at the end of recovery.
  *
- * Note, that system  spaces are exception to this, since
+ * Note, that system spaces are exception to this, since
  * they are fully enabled at all times.
  */
 void
 AddIndex::alter(struct alter_space *alter)
 {
-	/*
-	 * READY_NO_KEYS is when a space has no functional keys.
-	 * Possible both during and after recovery.
-	 */
-	engine_recovery *recovery =
-		&alter->new_space->handler->recovery;
-
-	if (recovery->state == READY_NO_KEYS) {
+	Engine *engine = alter->new_space->handler->engine;
+	if (space_index(alter->old_space, 0) == NULL) {
 		if (new_key_def->iid == 0) {
 			/*
 			 * Adding a primary key: bring the space
@@ -804,49 +781,32 @@ AddIndex::alter(struct alter_space *alter)
 			 * key. After recovery, it means building
 			 * all keys.
 			 */
-			recovery->recover(alter->new_space);
+			engine->addPrimaryKey(alter->new_space);
 		} else {
 			/*
-			 * Adding a secondary key: nothing to do.
-			 * Before the end of recovery, nothing to do
-			 * because secondary keys are built in bulk later.
-			 * During normal operation, nothing to do
-			 * because without a primary key there is
-			 * no data in the space, and secondary
-			 * keys are built once the primary is
-			 * added.
-			 * TODO Consider prohibiting this branch
-			 * altogether.
+			 * Adding a secondary key.
 			 */
+			tnt_raise(ClientError, ER_ALTER_SPACE,
+				  space_name(alter->new_space),
+				  "can not add a secondary key before primary");
 		}
 		return;
 	}
+	/**
+	 * If it's a secondary key, and we're not building them
+	 * yet (i.e. it's snapshot recovery for memtx), do nothing.
+	 */
+	if (new_key_def->iid != 0 && !engine->needToBuildSecondaryKey(alter->new_space))
+		return;
+
 	Index *pk = index_find(alter->old_space, 0);
 	Index *new_index = index_find(alter->new_space, new_key_def->iid);
 
-	/* READY_PRIMARY_KEY is a state that only occurs during WAL recovery. */
-	if (recovery->state == READY_PRIMARY_KEY) {
-		if (new_key_def->iid == 0) {
-			/*
-			 * Bulk rebuild of the new primary key
-			 * from old primary key - it is safe to do
-			 * in bulk and without tuple-by-tuple
-			 * verification, since all tuples have
-			 * been verified when inserted, before
-			 * shutdown.
-			 */
-			index_build(new_index, pk);
-		} else {
-			/*
-			 * No need to build a secondary key during
-			 * WAL recovery.
-			 */
-		}
-		return;
-	}
 	/* Now deal with any kind of add index during normal operation. */
 	struct iterator *it = pk->position();
 	pk->initIterator(it, ITER_ALL, NULL, 0);
+	IteratorGuard it_guard(it);
+
 	/*
 	 * The index has to be built tuple by tuple, since
 	 * there is no guarantee that all tuples satisfy
@@ -967,6 +927,9 @@ on_drop_space(struct trigger * /* trigger */, void *event)
 static void
 on_replace_dd_space(struct trigger * /* trigger */, void *event)
 {
+	latch_lock(&schema_lock);
+	auto lock_guard = make_scoped_guard([&]{ latch_unlock(&schema_lock); });
+
 	struct txn *txn = (struct txn *) event;
 	txn_check_autocommit(txn, "Space _space");
 	struct txn_stmt *stmt = txn_stmt(txn);
@@ -993,7 +956,8 @@ on_replace_dd_space(struct trigger * /* trigger */, void *event)
 	if (new_tuple != NULL && old_space == NULL) { /* INSERT */
 		struct space_def def;
 		space_def_create_from_tuple(&def, new_tuple, ER_CREATE_SPACE);
-		struct space *space = space_new(&def, &rlist_nil);
+		RLIST_HEAD(empty_list);
+		struct space *space = space_new(&def, &empty_list);
 		(void) space_cache_replace(space);
 		/*
 		 * So may happen that until the DDL change record
@@ -1011,12 +975,12 @@ on_replace_dd_space(struct trigger * /* trigger */, void *event)
 		/* Verify that the space is empty (has no indexes) */
 		if (old_space->index_count) {
 			tnt_raise(ClientError, ER_DROP_SPACE,
-				  (unsigned) space_id(old_space),
+				  space_name(old_space),
 				  "the space has indexes");
 		}
 		if (schema_find_grants("space", old_space->def.id)) {
 			tnt_raise(ClientError, ER_DROP_SPACE,
-				  (unsigned) space_id(old_space),
+				  space_name(old_space),
 				  "the space has grants");
 		}
 		/* @todo lock space metadata until commit. */
@@ -1085,6 +1049,9 @@ on_replace_dd_space(struct trigger * /* trigger */, void *event)
 static void
 on_replace_dd_index(struct trigger * /* trigger */, void *event)
 {
+	latch_lock(&schema_lock);
+	auto lock_guard = make_scoped_guard([&]{ latch_unlock(&schema_lock); });
+
 	struct txn *txn = (struct txn *) event;
 	txn_check_autocommit(txn, "Space _index");
 	struct txn_stmt *stmt = txn_stmt(txn);
@@ -1133,13 +1100,13 @@ space_has_data(uint32_t id, uint32_t iid, uint32_t uid)
 	Index *index = space_index(space, iid);
 	if (index == NULL)
 		return false;
-	assert(strcmp(index->key_def->name, "owner") == 0);
 	struct iterator *it = index->position();
 	char key[6];
 	assert(mp_sizeof_uint(SC_SYSTEM_ID_MIN) <= sizeof(key));
 	mp_encode_uint(key, uid);
 
 	index->initIterator(it, ITER_EQ, key, 1);
+	IteratorGuard it_guard(it);
 	if (it->next(it))
 		return true;
 	return false;
@@ -1149,10 +1116,15 @@ bool
 user_has_data(struct user *user)
 {
 	uint32_t uid = user->uid;
-	uint32_t spaces[] = { SC_SPACE_ID, SC_FUNC_ID, SC_PRIV_ID };
-	uint32_t *end = spaces + sizeof(spaces)/sizeof(*spaces);
-	for (uint32_t *i = spaces; i < end; i++) {
-		if (space_has_data(*i, 1, uid))
+	uint32_t spaces[] = { SC_SPACE_ID, SC_FUNC_ID, SC_PRIV_ID, SC_PRIV_ID };
+	/*
+	 * owner index id #1 for _space and _func and _priv.
+	 * For _priv also check that the user has no grants.
+	 */
+	uint32_t indexes[] = { 1, 1, 1, 0 };
+	uint32_t count = sizeof(spaces)/sizeof(*spaces);
+	for (int i = 0; i < count; i++) {
+		if (space_has_data(spaces[i], indexes[i], uid))
 			return true;
 	}
 	if (! user_map_is_empty(&user->users))
@@ -1243,10 +1215,13 @@ user_def_create_from_tuple(struct user_def *user, struct tuple *tuple)
 	 */
 	if (tuple_field_count(tuple) > AUTH_MECH_LIST) {
 		const char *auth_data = tuple_field(tuple, AUTH_MECH_LIST);
-		if (user->type == SC_ROLE && strlen(auth_data)) {
-			tnt_raise(ClientError, ER_CREATE_ROLE, user->name,
-				  "authentication data can not be set for "
-				  "a role");
+		if (strlen(auth_data)) {
+			if (user->type == SC_ROLE)
+				tnt_raise(ClientError, ER_CREATE_ROLE,
+					  user->name, "authentication "
+					  "data can not be set for a role");
+			if (user->uid == GUEST)
+				tnt_raise(ClientError, ER_GUEST_USER_PASSWORD);
 		}
 		user_def_fill_auth_data(user, auth_data);
 	}
@@ -1734,31 +1709,31 @@ on_replace_dd_cluster(struct trigger *trigger, void *event)
 /* }}} cluster configuration */
 
 struct trigger alter_space_on_replace_space = {
-	rlist_nil, on_replace_dd_space, NULL, NULL
+	RLIST_LINK_INITIALIZER, on_replace_dd_space, NULL, NULL
 };
 
 struct trigger alter_space_on_replace_index = {
-	rlist_nil, on_replace_dd_index, NULL, NULL
+	RLIST_LINK_INITIALIZER, on_replace_dd_index, NULL, NULL
 };
 
 struct trigger on_replace_schema = {
-	rlist_nil, on_replace_dd_schema, NULL, NULL
+	RLIST_LINK_INITIALIZER, on_replace_dd_schema, NULL, NULL
 };
 
 struct trigger on_replace_user = {
-	rlist_nil, on_replace_dd_user, NULL, NULL
+	RLIST_LINK_INITIALIZER, on_replace_dd_user, NULL, NULL
 };
 
 struct trigger on_replace_func = {
-	rlist_nil, on_replace_dd_func, NULL, NULL
+	RLIST_LINK_INITIALIZER, on_replace_dd_func, NULL, NULL
 };
 
 struct trigger on_replace_priv = {
-	rlist_nil, on_replace_dd_priv, NULL, NULL
+	RLIST_LINK_INITIALIZER, on_replace_dd_priv, NULL, NULL
 };
 
 struct trigger on_replace_cluster = {
-	rlist_nil, on_replace_dd_cluster, NULL, NULL
+	RLIST_LINK_INITIALIZER, on_replace_dd_cluster, NULL, NULL
 };
 
 /* vim: set foldmethod=marker */

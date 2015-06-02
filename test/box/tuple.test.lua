@@ -66,21 +66,35 @@ box.tuple.new{{1, 2}, 'x', 'y', 'z', {c = 3, d = 4}, {e = 5, f = 6}}
 box.tuple.new('x', 'y', 'z', {1, 2}, {c = 3, d = 4}, {e = 5, f = 6})
 box.tuple.new{'x', 'y', 'z', {1, 2}, {c = 3, d = 4}, {e = 5, f = 6}}
 
---
--- A test case for #107 "box.tuple.unpack asserts on extra arguments"
---
 t=box.tuple.new{'a','b','c'}
-t:unpack(5)
-t:unpack(1, 2, 3, 4, 5)
+t:totable()
+t:unpack()
+t:totable(1)
+t:unpack(1)
+t:totable(2)
+t:unpack(2)
+t:totable(1, 3)
+t:unpack(1, 3)
+t:totable(2, 3)
+t:unpack(2, 3)
+t:totable(2, 4)
+t:unpack(2, 4)
+t:totable(nil, 2)
+t:unpack(nil, 2)
+t:totable(2, 1)
+t:unpack(2, 1)
+
+t:totable(0)
+t:totable(1, 0)
 
 --
 -- Check that tuple:totable correctly sets serializer hints
 --
 box.tuple.new{1, 2, 3}:totable()
-getmetatable(box.tuple.new{1, 2, 3}:totable())
+getmetatable(box.tuple.new{1, 2, 3}:totable()).__serialize
 
 --  A test case for the key as an tuple
-space = box.schema.create_space('tweedledum')
+space = box.schema.space.create('tweedledum')
 index = space:create_index('primary')
 space:truncate()
 t=space:insert{0, 777, '0', '1', '2', '3'}
@@ -265,5 +279,14 @@ msgpack.decode(msgpack.encode({1, {'x', 'y', t, 'z'}, 2, 3}))
 
 -- restore configuration
 msgpack.cfg{encode_load_metatables = encode_load_metatables}
+
+-- gh-738: Serializer hints are unclear
+t = box.tuple.new({1, 2, {}})
+map = t[3]
+getmetatable(map) ~= nil
+map
+map['test'] = 48
+map
+getmetatable(map) == nil
 
 space:drop()

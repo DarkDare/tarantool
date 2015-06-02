@@ -28,7 +28,6 @@
  */
 extern "C" {
 #include "unit.h"
-#include "unit.h"
 } /* extern "C" */
 
 #include <stdarg.h>
@@ -157,9 +156,9 @@ test_isearch()
 
 	int64_t queries[][NODE_N + 1] = {
 		/* not found (lsns are too old) */
-		{  0,  0, 0, 0, /* => */ INT64_MAX},
-		{  1,  0, 0, 0, /* => */ INT64_MAX},
-		{  5,  0, 0, 0, /* => */ INT64_MAX},
+		{  0,  0, 0, 0, /* => */ 10},
+		{  1,  0, 0, 0, /* => */ 10},
+		{  5,  0, 0, 0, /* => */ 10},
 
 		/* =10.xlog (left bound) */
 		{  10, 0, 0, 0, /* => */ 10},
@@ -231,8 +230,8 @@ test_isearch()
 		}
 
 		int64_t check = *(query + NODE_N);
-		struct vclock *res = vclockset_isearch(&set, &vclock);
-		int64_t value = res != NULL ? vclock_signature(res) : INT64_MAX;
+		struct vclock *res = vclockset_match(&set, &vclock);
+		int64_t value = res != NULL ? vclock_sum(res) : INT64_MAX;
 		is(value, check, "query #%d", q + 1);
 	}
 
@@ -248,12 +247,17 @@ test_tostring_one(uint32_t count, const int64_t *lsns, const char *res)
 	struct vclock vclock;
 	vclock_create(&vclock);
 	for (uint32_t node_id = 0; node_id < count; node_id++) {
-		vclock.lsn[node_id] = lsns[node_id];
+		if (lsns[node_id] >= 0)
+			vclock_add_server(&vclock, node_id);
+		if (lsns[node_id] > 0)
+			vclock_follow(&vclock, node_id, lsns[node_id]);
 	}
 	char *str = vclock_to_string(&vclock);
-	int result = strcmp(str, res) == 0;
+	int result = strcmp(str, res);
+	if (result)
+		diag("\n!!!new result!!! %s\n", str);
 	free(str);
-	return result;
+	return !result;
 }
 
 #define test(xa, res) ({\

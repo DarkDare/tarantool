@@ -7,10 +7,13 @@ dofile('utils.lua')
 -------------------------------------------------------------------------------
 -- 32-bit hash insert fields tests
 -------------------------------------------------------------------------------
-hash = box.schema.create_space('tweedledum')
+hash = box.schema.space.create('tweedledum')
 ---
 ...
 tmp = hash:create_index('primary', { type = 'hash', parts = {1, 'num'}, unique = true })
+---
+...
+bsize = tmp:bsize()
 ---
 ...
 -- Insert valid fields
@@ -30,10 +33,14 @@ hash:insert{3, 'value1 v1.0', 'value2 v1.0'}
 ---
 - [3, 'value1 v1.0', 'value2 v1.0']
 ...
+tmp:bsize() > bsize
+---
+- true
+...
 -- Insert invalid fields
 hash:insert{'invalid key', 'value1 v1.0', 'value2 v1.0'}
 ---
-- error: 'Tuple field 0 type does not match one required by operation: expected NUM'
+- error: 'Tuple field 1 type does not match one required by operation: expected NUM'
 ...
 -------------------------------------------------------------------------------
 -- 32-bit hash replace fields tests
@@ -54,7 +61,7 @@ hash:replace{2, 'value1 v1.43', 'value2 1.92'}
 -- Replace invalid fields
 hash:replace{'invalid key', 'value1 v1.0', 'value2 v1.0'}
 ---
-- error: 'Tuple field 0 type does not match one required by operation: expected NUM'
+- error: 'Tuple field 1 type does not match one required by operation: expected NUM'
 ...
 -------------------------------------------------------------------------------
 -- 32-bit hash select fields test
@@ -89,7 +96,7 @@ hash.index['primary']:get{'invalid key'}
 ...
 hash.index['primary']:get{1, 2}
 ---
-- error: Invalid key part count (expected [0..1], got 2)
+- error: Invalid key part count in an exact match (expected 1, got 2)
 ...
 -------------------------------------------------------------------------------
 -- 32-bit hash delete fields test
@@ -171,7 +178,7 @@ hash:insert{103, 'value1 v1.0', 'value2 v1.0'}
 ...
 hash:insert{'invalid key', 'value1 v1.0', 'value2 v1.0'}
 ---
-- error: 'Tuple field 0 type does not match one required by operation: expected NUM'
+- error: 'Tuple field 1 type does not match one required by operation: expected NUM'
 ...
 -------------------------------------------------------------------------------
 -- 64-bit hash replace fields tests
@@ -204,7 +211,7 @@ hash:replace{2, 'value1 v1.43', 'value2 1.92'}
 ...
 hash:replace{'invalid key', 'value1 v1.0', 'value2 v1.0'}
 ---
-- error: 'Tuple field 0 type does not match one required by operation: expected NUM'
+- error: 'Tuple field 1 type does not match one required by operation: expected NUM'
 ...
 -------------------------------------------------------------------------------
 -- 64-bit hash select fields test
@@ -262,7 +269,7 @@ hash.index['primary']:get{'invalid key'}
 ...
 hash.index['primary']:get{'00000001', '00000002'}
 ---
-- error: Invalid key part count (expected [0..1], got 2)
+- error: Invalid key part count in an exact match (expected 1, got 2)
 ...
 -------------------------------------------------------------------------------
 -- 64-bit hash delete fields test
@@ -415,7 +422,7 @@ hash.index['primary']:get{'key 5'}
 -- select by invalid keys
 hash.index['primary']:get{'key 1', 'key 2'}
 ---
-- error: Invalid key part count (expected [0..1], got 2)
+- error: Invalid key part count in an exact match (expected 1, got 2)
 ...
 -------------------------------------------------------------------------------
 -- String hash delete fields test
@@ -538,7 +545,7 @@ hash.index['field3']:get{10}
 -- TupleFound (primary key)
 hash:insert{1, 10, 10, 10}
 ---
-- error: Duplicate key exists in unique index 0
+- error: Duplicate key exists in unique index 'primary' in space 'tweedledum'
 ...
 hash.index['primary']:get{10}
 ---
@@ -580,7 +587,7 @@ hash.index['field3']:get{10}
 -- TupleFound (key --1)
 hash:insert{10, 0, 10, 10}
 ---
-- error: Duplicate key exists in unique index 0
+- error: Duplicate key exists in unique index 'primary' in space 'tweedledum'
 ...
 hash.index['primary']:get{10}
 ---
@@ -627,7 +634,7 @@ hash.index['field1']:get{0}
 -- TupleFound (key --3)
 hash:insert{10, 10, 10, 0}
 ---
-- error: Duplicate key exists in unique index 0
+- error: Duplicate key exists in unique index 'primary' in space 'tweedledum'
 ...
 hash.index['primary']:get{10}
 ---
@@ -672,5 +679,41 @@ hash.index['field3']:get{0}
 - [0, 0, 0, 0]
 ...
 hash:drop()
+---
+...
+hash = box.schema.space.create('tweedledum')
+---
+...
+hi = hash:create_index('primary', { type = 'hash', parts = {1, 'num'}, unique = true })
+---
+...
+hash:insert{0}
+---
+- [0]
+...
+hash:insert{16}
+---
+- [16]
+...
+for _, tuple in hi:pairs(nil, {iterator = box.index.ALL}) do hash:delete{tuple[1]} end
+---
+...
+hash:drop()
+---
+...
+-- 
+-- gh-616 "1-based indexing and 0-based error message
+--
+_ = box.schema.create_space('test')
+---
+...
+_ = box.space.test:create_index('i',{parts={1,'STR'}})
+---
+...
+box.space.test:insert{1}
+---
+- error: 'Tuple field 1 type does not match one required by operation: expected STR'
+...
+box.space.test:drop()
 ---
 ...

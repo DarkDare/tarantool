@@ -1,4 +1,15 @@
-space = box.schema.create_space('tweedledum')
+--# push filter 'table: .*' to 'table: <address>'
+
+-- gh-266: box.info() crash on uncofigured box
+package.loaded['box.space'] == nil
+package.loaded['box.index'] == nil
+package.loaded['box.tuple'] == nil
+package.loaded['box.error'] == nil
+package.loaded['box.info'] == nil
+package.loaded['box.stat'] == nil
+package.loaded['box.session'] == nil
+
+space = box.schema.space.create('tweedledum')
 index = space:create_index('primary', { type = 'hash' })
 
 -- Test Lua from admin console. Whenever producing output,
@@ -15,10 +26,15 @@ t = nil
 
 --# stop server default
 --# start server default
+box.error.last()
 box.error({code = 123, reason = 'test'})
 box.error(box.error.ILLEGAL_PARAMS, "bla bla")
 box.error()
-box.error()
+box.error.raise()
+box.error.last()
+box.error.clear()
+box.error.last()
+box.error.raise()
 
 space = box.space.tweedledum
 
@@ -161,3 +177,4 @@ fifo_top(space, 1)
 space:delete{1}
 
 space:drop()
+--# clear filter

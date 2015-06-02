@@ -1,7 +1,7 @@
-errinj = require('box.error.injection')
+errinj = box.error.injection
 ---
 ...
-space = box.schema.create_space('tweedledum')
+space = box.schema.space.create('tweedledum')
 ---
 ...
 index = space:create_index('primary', { type = 'hash' })
@@ -9,13 +9,17 @@ index = space:create_index('primary', { type = 'hash' })
 ...
 errinj.info()
 ---
-- ERRINJ_INDEX_ALLOC:
+- ERRINJ_WAL_WRITE:
     state: false
-  ERRINJ_WAL_IO:
+  ERRINJ_TESTING:
     state: false
   ERRINJ_WAL_ROTATE:
     state: false
-  ERRINJ_TESTING:
+  ERRINJ_INDEX_ALLOC:
+    state: false
+  ERRINJ_TUPLE_ALLOC:
+    state: false
+  ERRINJ_WAL_IO:
     state: false
 ...
 errinj.set("some-injection", true)
@@ -26,14 +30,15 @@ errinj.set("some-injection") -- check error
 ---
 - 'error: can''t find error injection ''some-injection'''
 ...
-space:get{222444}
+space:select{222444}
 ---
+- []
 ...
 errinj.set("ERRINJ_TESTING", true)
 ---
 - ok
 ...
-space:get{222444}
+space:select{222444}
 ---
 - error: Error injection 'ERRINJ_TESTING'
 ...
@@ -65,7 +70,7 @@ errinj.set("ERRINJ_WAL_IO", true)
 ---
 - ok
 ...
-space:update(1, {{'=', 1, 2}})
+space:update(1, {{'=', 2, 2}})
 ---
 - error: Failed to write to disk
 ...
@@ -107,7 +112,7 @@ errinj.set("ERRINJ_WAL_ROTATE", true)
 ---
 - ok
 ...
-space:update(1, {{'=', 1, 2}})
+space:update(1, {{'=', 2, 2}})
 ---
 - error: Failed to write to disk
 ...
@@ -122,16 +127,16 @@ errinj.set("ERRINJ_WAL_ROTATE", false)
 ---
 - ok
 ...
-space:update(1, {{'=', 1, 2}})
+space:update(1, {{'=', 2, 2}})
 ---
-- [2]
+- [1, 2]
 ...
 space:get{1}
 ---
+- [1, 2]
 ...
 space:get{2}
 ---
-- [2]
 ...
 errinj.set("ERRINJ_WAL_ROTATE", true)
 ---
@@ -152,16 +157,16 @@ space:drop()
 ---
 ...
 -- Check how well we handle a failed log write in DDL
-s_disabled = box.schema.create_space('disabled')
+s_disabled = box.schema.space.create('disabled')
 ---
 ...
-s_withindex = box.schema.create_space('withindex')
+s_withindex = box.schema.space.create('withindex')
 ---
 ...
 index1 = s_withindex:create_index('primary', { type = 'hash' })
 ---
 ...
-s_withdata = box.schema.create_space('withdata')
+s_withdata = box.schema.space.create('withdata')
 ---
 ...
 index2 = s_withdata:create_index('primary', { type = 'tree' })
@@ -182,7 +187,7 @@ errinj.set("ERRINJ_WAL_IO", true)
 ---
 - ok
 ...
-test = box.schema.create_space('test')
+test = box.schema.space.create('test')
 ---
 - error: Failed to write to disk
 ...
@@ -234,7 +239,7 @@ errinj.set("ERRINJ_WAL_IO", false)
 ---
 - ok
 ...
-test = box.schema.create_space('test')
+test = box.schema.space.create('test')
 ---
 ...
 index5 = s_disabled:create_index('primary', { type = 'hash' })
@@ -271,7 +276,7 @@ box.space['withdata']
 ...
 index7 = s_withdata:create_index('another', { type = 'tree', parts = { 5, 'num' }, unique = false})
 ---
-- error: Space '514' does not exist
+- error: Space 'withdata' does not exist
 ...
 s_withdata.index.another
 ---
@@ -284,6 +289,113 @@ s_disabled:drop()
 ---
 ...
 s_withindex:drop()
+---
+...
+-- Check transaction rollback when out of memory
+s = box.schema.space.create('s')
+---
+...
+_ = s:create_index('pk')
+---
+...
+errinj.set("ERRINJ_TUPLE_ALLOC", true)
+---
+- ok
+...
+s:auto_increment{}
+---
+- error: Error injection 'ERRINJ_TUPLE_ALLOC'
+...
+s:select{}
+---
+- []
+...
+s:auto_increment{}
+---
+- error: Error injection 'ERRINJ_TUPLE_ALLOC'
+...
+s:select{}
+---
+- []
+...
+s:auto_increment{}
+---
+- error: Error injection 'ERRINJ_TUPLE_ALLOC'
+...
+s:select{}
+---
+- []
+...
+--# setopt delimiter ';'
+box.begin()
+    s:insert{1}
+box.commit();
+---
+- error: Error injection 'ERRINJ_TUPLE_ALLOC'
+...
+s:select{};
+---
+- []
+...
+box.begin()
+    s:insert{1}
+    s:insert{2}
+box.commit();
+---
+- error: Error injection 'ERRINJ_TUPLE_ALLOC'
+...
+s:select{};
+---
+- []
+...
+box.begin()
+    pcall(s.insert, s, {1})
+    s:insert{2}
+box.commit();
+---
+- error: Error injection 'ERRINJ_TUPLE_ALLOC'
+...
+s:select{};
+---
+- []
+...
+errinj.set("ERRINJ_TUPLE_ALLOC", false);
+---
+- ok
+...
+box.begin()
+    s:insert{1}
+    errinj.set("ERRINJ_TUPLE_ALLOC", true)
+    s:insert{2}
+box.commit();
+---
+- error: Error injection 'ERRINJ_TUPLE_ALLOC'
+...
+s:select{};
+---
+- []
+...
+errinj.set("ERRINJ_TUPLE_ALLOC", false);
+---
+- ok
+...
+box.begin()
+    s:insert{1}
+    errinj.set("ERRINJ_TUPLE_ALLOC", true)
+    pcall(s.insert, s, {2})
+box.commit();
+---
+...
+s:select{};
+---
+- - [1]
+...
+--# setopt delimiter ''
+errinj.set("ERRINJ_TUPLE_ALLOC", false)
+---
+- ok
+...
+s:drop()
 ---
 ...
 errinj = nil

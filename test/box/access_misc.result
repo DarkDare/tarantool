@@ -4,10 +4,10 @@ session = box.session
 --
 -- Check a double create space
 --
-s = box.schema.create_space('test')
+s = box.schema.space.create('test')
 ---
 ...
-s = box.schema.create_space('test')
+s = box.schema.space.create('test')
 ---
 - error: Space 'test' already exists
 ...
@@ -19,7 +19,7 @@ s:drop()
 ...
 s:drop()
 ---
-- error: Space '#512' does not exist
+- error: Space 'test' does not exist
 ...
 --
 -- Check double create user
@@ -31,7 +31,7 @@ box.schema.user.create('testus')
 ---
 - error: User 'testus' already exists
 ...
-s = box.schema.create_space('admin_space')
+s = box.schema.space.create('admin_space')
 ---
 ...
 index = s:create_index('primary', {type = 'hash', parts = {1, 'NUM'}})
@@ -165,9 +165,9 @@ s:drop()
 ---
 - error: Read access denied for user 'guest' to space '_index'
 ...
-gs = box.schema.create_space('guest_space')
+gs = box.schema.space.create('guest_space')
 ---
-- error: Read access denied for user 'guest' to space '_space'
+- error: Write access denied for user 'guest' to space '_schema'
 ...
 box.schema.func.create('guest_func')
 ---
@@ -224,7 +224,7 @@ box.schema.func.drop('uniuser_func')
 --
 -- Check create and drop space
 --
-us = box.schema.create_space('uniuser_space')
+us = box.schema.space.create('uniuser_space')
 ---
 ...
 us:drop()
@@ -258,7 +258,7 @@ box.space._space:select(280)
       {'name': 'field_count', 'type': 'num'}, {'name': 'flags', 'type': 'str'}, {
         'name': 'format', 'type': '*'}]]
 ...
-us = box.schema.create_space('uniuser_space')
+us = box.schema.space.create('uniuser_space')
 ---
 ...
 box.schema.func.create('uniuser_func')
@@ -415,7 +415,7 @@ box.schema.user.revoke('testuser', 'read, write, execute', 'universe')
 --
 -- Check that itertors check privileges
 --
-s = box.schema.create_space('glade') 
+s = box.schema.space.create('glade') 
 ---
 ...
 box.schema.user.grant('testuser', 'read', 'space', 'glade')
@@ -585,13 +585,30 @@ box.space._space:select()
         'type': 'num'}, {'name': 'name', 'type': 'str'}, {'name': 'engine', 'type': 'str'},
       {'name': 'field_count', 'type': 'num'}, {'name': 'flags', 'type': 'str'}, {
         'name': 'format', 'type': '*'}]]
-  - [288, 1, '_index', 'memtx', 0, '']
+  - [281, 1, '_vspace', 'sysview', 0, '', [{'name': 'id', 'type': 'num'}, {'name': 'owner',
+        'type': 'num'}, {'name': 'name', 'type': 'str'}, {'name': 'engine', 'type': 'str'},
+      {'name': 'field_count', 'type': 'num'}, {'name': 'flags', 'type': 'str'}, {
+        'name': 'format', 'type': '*'}]]
+  - [288, 1, '_index', 'memtx', 0, '', [{'name': 'id', 'type': 'num'}, {'name': 'iid',
+        'type': 'num'}, {'name': 'name', 'type': 'str'}, {'name': 'type', 'type': 'str'},
+      {'name': 'unique', 'type': 'num'}, {'name': 'part_count', 'type': 'num'}]]
+  - [289, 1, '_vindex', 'sysview', 0, '', [{'name': 'id', 'type': 'num'}, {'name': 'iid',
+        'type': 'num'}, {'name': 'name', 'type': 'str'}, {'name': 'type', 'type': 'str'},
+      {'name': 'unique', 'type': 'num'}, {'name': 'part_count', 'type': 'num'}]]
   - [296, 1, '_func', 'memtx', 0, '', [{'name': 'id', 'type': 'num'}, {'name': 'owner',
+        'type': 'num'}, {'name': 'name', 'type': 'str'}, {'name': 'setuid', 'type': 'num'}]]
+  - [297, 1, '_vfunc', 'sysview', 0, '', [{'name': 'id', 'type': 'num'}, {'name': 'owner',
         'type': 'num'}, {'name': 'name', 'type': 'str'}, {'name': 'setuid', 'type': 'num'}]]
   - [304, 1, '_user', 'memtx', 0, '', [{'name': 'id', 'type': 'num'}, {'name': 'owner',
         'type': 'num'}, {'name': 'name', 'type': 'str'}, {'name': 'type', 'type': 'str'},
       {'name': 'auth', 'type': '*'}]]
+  - [305, 1, '_vuser', 'sysview', 0, '', [{'name': 'id', 'type': 'num'}, {'name': 'owner',
+        'type': 'num'}, {'name': 'name', 'type': 'str'}, {'name': 'type', 'type': 'str'},
+      {'name': 'auth', 'type': '*'}]]
   - [312, 1, '_priv', 'memtx', 0, '', [{'name': 'grantor', 'type': 'num'}, {'name': 'grantee',
+        'type': 'num'}, {'name': 'object_type', 'type': 'str'}, {'name': 'object_id',
+        'type': 'num'}, {'name': 'privilege', 'type': 'num'}]]
+  - [313, 1, '_vpriv', 'sysview', 0, '', [{'name': 'grantor', 'type': 'num'}, {'name': 'grantee',
         'type': 'num'}, {'name': 'object_type', 'type': 'str'}, {'name': 'object_id',
         'type': 'num'}, {'name': 'privilege', 'type': 'num'}]]
   - [320, 1, '_cluster', 'memtx', 0, '', [{'name': 'id', 'type': 'num'}, {'name': 'uuid',

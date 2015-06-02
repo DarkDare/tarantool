@@ -30,21 +30,11 @@
  */
 
 #include "trivia/config.h"
-#include "trivia/util.h"
 
-#include <stdbool.h>
-#include <stdint.h>
+#include <sys/types.h> /* ssize_t */
 #include <stdarg.h>
-#include <unistd.h>
-#include <coro.h>
-#include "third_party/tarantool_ev.h"
+
 #include "third_party/tarantool_eio.h"
-
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netdb.h>
-
-#define ERESOLVE -1
 
 #if defined(__cplusplus)
 extern "C" {
@@ -58,11 +48,50 @@ extern "C" {
 
 void coeio_init(void);
 void coeio_reinit(void);
-ssize_t coeio_custom(ssize_t (*f)(va_list ap), ev_tstamp timeout, ...);
 
-struct addrinfo *
-coeio_resolve(int socktype, const char *host, const char *port,
-              ev_tstamp timeout);
+struct coeio_task;
+
+typedef ssize_t (*coio_task_cb)(struct coio_task *task); /* like eio_req */
+typedef ssize_t (*coio_call_cb)(va_list ap);
+typedef void (*coio_task_timeout_cb)(struct coio_task *task); /* like eio_req */
+
+/**
+ * A single task context.
+ */
+struct coio_task {
+	struct eio_req base; /* eio_task - must be first */
+	/** The calling fiber. */
+	struct fiber *fiber;
+	/** Callbacks. */
+	union {
+		struct { /* coio_task() */
+			coio_task_cb task_cb;
+			coio_task_timeout_cb timeout_cb;
+		};
+		struct { /* coio_call() */
+			coio_call_cb call_cb;
+			va_list ap;
+		};
+	};
+	/** Callback results. */
+	int complete;
+};
+
+ssize_t
+coio_task(struct coio_task *task, coio_task_cb func,
+	  coio_task_timeout_cb on_timeout, double timeout);
+
+/** \cond public */
+ssize_t
+coio_call(ssize_t (*func)(va_list ap), ...);
+
+struct addrinfo;
+
+int
+coio_getaddrinfo(const char *host, const char *port,
+		 const struct addrinfo *hints, struct addrinfo **res,
+		 double timeout);
+/** \endcond public */
 
 #if defined(__cplusplus)
 }

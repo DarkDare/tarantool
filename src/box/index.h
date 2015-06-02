@@ -161,7 +161,7 @@ protected:
 	 * Pre-allocated iterator to speed up the main case of
 	 * box_process(). Should not be used elsewhere.
 	 */
-	struct iterator *m_position;
+	mutable struct iterator *m_position;
 public:
 	virtual ~Index();
 
@@ -177,14 +177,19 @@ public:
 	virtual void reserve(uint32_t /* size_hint */);
 	virtual void buildNext(struct tuple *tuple);
 	virtual void endBuild();
-	virtual size_t size() const = 0;
+	virtual size_t size() const;
+	virtual struct tuple *min(const char *key, uint32_t part_count) const;
+	virtual struct tuple *max(const char *key, uint32_t part_count) const;
 	virtual struct tuple *random(uint32_t rnd) const;
+	virtual size_t count(enum iterator_type type, const char *key,
+			     uint32_t part_count) const;
 	virtual struct tuple *findByKey(const char *key, uint32_t part_count) const = 0;
 	virtual struct tuple *findByTuple(struct tuple *tuple) const;
 	virtual struct tuple *replace(struct tuple *old_tuple,
 				      struct tuple *new_tuple,
 				      enum dup_replace_mode mode) = 0;
-	virtual size_t memsize() const = 0;
+	virtual size_t bsize() const;
+
 	/**
 	 * Create a structure to represent an iterator. Must be
 	 * initialized separately.
@@ -194,11 +199,34 @@ public:
 				  enum iterator_type type,
 				  const char *key, uint32_t part_count) const = 0;
 
-	inline struct iterator *position()
+	/**
+	 * Create a read view for iterator so further index modifications
+	 * will not affect the iteration results.
+	 */
+	virtual void createReadViewForIterator(struct iterator *iterator);
+	/**
+	 * Destroy a read view of an iterator. Must be called for iterators,
+	 * for which createReadViewForIterator() was called.
+	 */
+	virtual void destroyReadViewForIterator(struct iterator *iterator);
+
+	inline struct iterator *position() const
 	{
 		if (m_position == NULL)
 			m_position = allocIterator();
 		return m_position;
+	}
+};
+
+struct IteratorGuard: public Object {
+	struct iterator *it;
+	IteratorGuard(struct iterator *it)
+		: it(it)
+	{}
+
+	~IteratorGuard()
+	{
+		iterator_close(it);
 	}
 };
 
@@ -216,7 +244,7 @@ replace_check_dup(struct tuple *old_tuple, struct tuple *dup_tuple,
 			 * dup_replace_mode is DUP_REPLACE, and
 			 * a tuple with the same key is not found.
 			 */
-			return ER_TUPLE_NOT_FOUND;
+			return old_tuple ? ER_CANT_UPDATE_PRIMARY_KEY : ER_TUPLE_NOT_FOUND;
 		}
 	} else { /* dup_tuple != NULL */
 		if (dup_tuple != old_tuple &&
@@ -239,6 +267,12 @@ static inline uint32_t
 index_id(const Index *index)
 {
 	return index->key_def->iid;
+}
+
+static inline const char *
+index_name(const Index *index)
+{
+	return index->key_def->name;
 }
 
 /** True if this index is a primary key. */

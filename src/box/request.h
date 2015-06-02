@@ -58,9 +58,18 @@ struct request
 	/** Insert/replace tuple or proc argument or update operations. */
 	const char *tuple;
 	const char *tuple_end;
-	/** Base field offset for error messages, e.g. 0 for C and 1 for Lua. */
-	int field_base;
+	/** Base field offset for UPDATE, e.g. 0 for C and 1 for Lua. */
+	int index_base;
 };
+
+/** The snapshot row metadata repeats the structure of REPLACE request. */
+struct request_replace_body {
+	uint8_t m_body;
+	uint8_t k_space_id;
+	uint8_t m_space_id;
+	uint32_t v_space_id;
+	uint8_t k_tuple;
+} __attribute__((packed));
 
 void
 request_create(struct request *request, uint32_t code);

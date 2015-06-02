@@ -30,23 +30,15 @@
 #include "fiber.h"
 #include <stdlib.h>
 
-static void
-ipc_channel_create(struct ipc_channel *ch);
-
-static void
-ipc_channel_destroy(struct ipc_channel *ch);
-
 struct ipc_channel *
 ipc_channel_new(unsigned size)
 {
-	if (!size)
+	if (size == 0)
 		size = 1;
 	struct ipc_channel *res = (struct ipc_channel *)
-		malloc(sizeof(struct ipc_channel) + sizeof(void *) * size);
-	if (res == NULL)
-		return NULL;
-	res->size = size;
-	ipc_channel_create(res);
+		malloc(ipc_channel_memsize(size));
+	if (res != NULL)
+		ipc_channel_create(res, size);
 	return res;
 }
 
@@ -57,28 +49,57 @@ ipc_channel_delete(struct ipc_channel *ch)
 	free(ch);
 }
 
-static void
-ipc_channel_create(struct ipc_channel *ch)
+void
+ipc_channel_create(struct ipc_channel *ch, unsigned size)
 {
+	ch->size = size;
 	ch->beg = ch->count = 0;
-	ch->closed = false;
+	ch->readonly = ch->closed = false;
 	ch->close = NULL;
 	ch->bcast = NULL;
 	rlist_create(&ch->readers);
 	rlist_create(&ch->writers);
 }
 
-static void
+void
 ipc_channel_destroy(struct ipc_channel *ch)
 {
+	/**
+	 * XXX: this code is buggy, since the deleted fibers are
+	 * not woken up, but luckily it never gets called.
+	 * As long as channels are only used in Lua, the situation
+	 * that ipc_channel_destroy() is called on a channel which
+	 * has waiters is impossible:
+	 *
+	 * if there is a Lua fiber waiting on a channel, neither
+	 * the channel nor the fiber will ever get collected. The
+	 * fiber Lua stack will keep a reference to the channel
+	 * userdata, and the stack itself is referenced while the
+	 * fiber is waiting.  So, as long as channels are used
+	 * from Lua, only a channel which has no waiters can get
+	 * collected.
+	 *
+	 * The other part of the problem, however, is that such
+	 * orphaned waiters create a garbage collection loop and
+	 * leak memory.
+	 * The only solution, it seems, is to implement some sort
+	 * of shutdown() on a channel, which wakes up all waiters,
+	 * and use it explicitly in Lua.  Waking up waiters in
+	 * __gc/destroy is not a solution, since __gc will simply
+	 * never get called.
+         */
 	while (!rlist_empty(&ch->writers)) {
 		struct fiber *f =
 			rlist_first_entry(&ch->writers, struct fiber, state);
+		say_error("closing a channel which has a write waiter %d %s",
+			  f->fid, fiber_name(f));
 		rlist_del_entry(f, state);
 	}
 	while (!rlist_empty(&ch->readers)) {
 		struct fiber *f =
 			rlist_first_entry(&ch->readers, struct fiber, state);
+		say_error("closing a channel which has a read waiter %d %s",
+			  f->fid, fiber_name(f));
 		rlist_del_entry(f, state);
 	}
 }
@@ -95,6 +116,8 @@ ipc_channel_get_timeout(struct ipc_channel *ch, ev_tstamp timeout)
 	void *res;
 	/* channel is empty */
 	while (ch->count == 0) {
+		if (ch->readonly)
+			return NULL;
 		/* try to be in FIFO order */
 		if (first_try) {
 			rlist_add_tail_entry(&ch->readers, fiber(), state);
@@ -121,7 +144,7 @@ ipc_channel_get_timeout(struct ipc_channel *ch, ev_tstamp timeout)
 			goto exit;
 		}
 
-		if (ch->closed) {
+		if (ch->readonly) {
 			res = NULL;
 			goto exit;
 		}
@@ -139,7 +162,7 @@ ipc_channel_get_timeout(struct ipc_channel *ch, ev_tstamp timeout)
 	}
 
 exit:
-	if (ch->closed && ch->close) {
+	if (ch->readonly && ch->close) {
 		fiber_wakeup(ch->close);
 		ch->close = NULL;
 	}
@@ -168,18 +191,18 @@ ipc_channel_close_waiter(struct ipc_channel *ch, struct fiber *f)
 }
 
 void
-ipc_channel_close(struct ipc_channel *ch)
+ipc_channel_shutdown(struct ipc_channel *ch)
 {
-	if (ch->closed)
+	if (ch->readonly)
 		return;
-	ch->closed = true;
+	ch->readonly = true;
 
 	struct fiber *f;
-	while(!rlist_empty(&ch->readers)) {
+	while (!rlist_empty(&ch->readers)) {
 		f = rlist_first_entry(&ch->readers, struct fiber, state);
 		ipc_channel_close_waiter(ch, f);
 	}
-	while(!rlist_empty(&ch->writers)) {
+	while (!rlist_empty(&ch->writers)) {
 		f = rlist_first_entry(&ch->writers, struct fiber, state);
 		ipc_channel_close_waiter(ch, f);
 	}
@@ -187,11 +210,23 @@ ipc_channel_close(struct ipc_channel *ch)
 		fiber_wakeup(ch->bcast);
 }
 
+void
+ipc_channel_close(struct ipc_channel *ch)
+{
+	if (ch->closed)
+		return;
+	assert(ch->readonly);
+	assert(ch->count == 0);
+	assert(rlist_empty(&ch->readers));
+	assert(rlist_empty(&ch->writers));
+	assert(ch->bcast == NULL);
+	ch->closed = true;
+}
 int
 ipc_channel_put_timeout(struct ipc_channel *ch, void *data,
 			ev_tstamp timeout)
 {
-	if (ch->closed) {
+	if (ch->readonly) {
 		errno = EBADF;
 		return -1;
 	}
@@ -223,7 +258,7 @@ ipc_channel_put_timeout(struct ipc_channel *ch, void *data,
 			goto exit;
 		}
 
-		if (ch->closed) {
+		if (ch->readonly) {
 			errno = EBADF;
 			res = -1;
 			goto exit;
@@ -245,7 +280,7 @@ ipc_channel_put_timeout(struct ipc_channel *ch, void *data,
 	}
 	res = 0;
 exit:
-	if (ch->closed && ch->close) {
+	if (ch->readonly && ch->close) {
 		int save_errno = errno;
 		fiber_wakeup(ch->close);
 		ch->close = NULL;
@@ -264,7 +299,7 @@ int
 ipc_channel_broadcast(struct ipc_channel *ch, void *data)
 {
 	/* do nothing at closed channel */
-	if (ch->closed)
+	if (ch->readonly)
 		return 0;
 
 	/* broadcast in broadcast: marasmus */
@@ -285,7 +320,7 @@ ipc_channel_broadcast(struct ipc_channel *ch, void *data)
 
 	unsigned cnt = 0;
 	while (!rlist_empty(&ch->readers)) {
-		if (ch->closed)
+		if (ch->readonly)
 			break;
 		f = rlist_first_entry(&ch->readers, struct fiber, state);
 
@@ -301,7 +336,7 @@ ipc_channel_broadcast(struct ipc_channel *ch, void *data)
 			break;
 	}
 
-	if (ch->closed && ch->close) {
+	if (ch->readonly && ch->close) {
 		fiber_wakeup(ch->close);
 		ch->close = NULL;
 	}

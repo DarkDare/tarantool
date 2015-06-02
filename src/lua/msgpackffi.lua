@@ -2,9 +2,8 @@
 
 local ffi = require('ffi')
 local builtin = ffi.C
-
+local msgpack = require('msgpack') -- .NULL, .array_mt, .map_mt, .cfg
 local MAXNESTING = 16
-local NULL = ffi.cast('void *', 0)
 local int8_ptr_t = ffi.typeof('int8_t *')
 local uint8_ptr_t = ffi.typeof('uint8_t *')
 local uint16_ptr_t = ffi.typeof('uint16_t *')
@@ -289,39 +288,41 @@ on_encode(ffi.typeof('double'), encode_double)
 -- Decoder
 --------------------------------------------------------------------------------
 
-local array_mt = { __serialize = 'seq' }
-local map_mt = { __serialize = 'map' }
-
 local decode_r
+
+local NUMBER_INT_MAX = 4503599627370496LL -- 2^52
 
 local function decode_u8(data)
     local num = ffi.cast(uint8_ptr_t, data[0])[0]
     data[0] = data[0] + 1
-    return num
+    return tonumber(num)
 end
 
 local function decode_u16(data)
     local num = bswap_u16(ffi.cast(uint16_ptr_t, data[0])[0])
     data[0] = data[0] + 2
-    return num
+    return tonumber(num)
 end
 
 local function decode_u32(data)
     local num = bswap_u32(ffi.cast(uint32_ptr_t, data[0])[0])
     data[0] = data[0] + 4
-    return num
+    return tonumber(num)
 end
 
 local function decode_u64(data)
     local num = bswap_u64(ffi.cast(uint64_ptr_t, data[0])[0])
     data[0] = data[0] + 8
-    return num
+    if num < NUMBER_INT_MAX then
+        return tonumber(num) -- return as 'number'
+    end
+    return num -- return as 'cdata'
 end
 
 local function decode_i8(data)
     local num = ffi.cast(int8_ptr_t, data[0])[0]
     data[0] = data[0] + 1
-    return num
+    return tonumber(num)
 end
 
 local function decode_i16(data)
@@ -337,9 +338,13 @@ local function decode_i32(data)
 end
 
 local function decode_i64(data)
-    local num = bswap_u64(ffi.cast(uint64_ptr_t, data[0])[0])
+    local num = ffi.cast('int64_t', ffi.cast('uint64_t',
+        bswap_u64(ffi.cast(uint64_ptr_t, data[0])[0])))
     data[0] = data[0] + 8
-    return ffi.cast('int64_t', ffi.cast('uint64_t', num))
+    if num > -NUMBER_INT_MAX and num < NUMBER_INT_MAX then
+        return tonumber(num) -- return as 'number'
+    end
+    return num -- return as 'cdata'
 end
 
 local bswap_buf = ffi.new('char[8]')
@@ -370,7 +375,10 @@ local function decode_array(data, size)
     for i=1,size,1 do
         table.insert(arr, decode_r(data))
     end
-    return setmetatable(arr, array_mt)
+    if not msgpack.cfg.decode_save_metatables then
+        return arr
+    end
+    return setmetatable(arr, msgpack.array_mt)
 end
 
 local function decode_map(data, size)
@@ -382,7 +390,10 @@ local function decode_map(data, size)
         local val = decode_r(data);
         map[key] = val
     end
-    return setmetatable(map, map_mt)
+    if not msgpack.cfg.decode_save_metatables then
+        return map
+    end
+    return setmetatable(map, msgpack.map_mt)
 end
 
 local decoder_hint = {
@@ -425,19 +436,17 @@ decode_r = function(data)
     local c = data[0][0]
     data[0] = data[0] + 1
     if c <= 0x7f then
-        return c -- fixint
+        return tonumber(c) -- fixint
     elseif c >= 0xa0 and c <= 0xbf then
         return decode_str(data, bit.band(c, 0x1f)) -- fixstr
     elseif c >= 0x90 and c <= 0x9f then
         return decode_array(data, bit.band(c, 0xf)) -- fixarray
     elseif c >= 0x80 and c <= 0x8f then
         return decode_map(data, bit.band(c, 0xf)) -- fixmap
-    elseif c <= 0x7f then
-        return c2
     elseif c >= 0xe0 then
-        return ffi.cast('signed char',c)
+        return tonumber(ffi.cast('signed char',c)) -- negfixint
     elseif c == 0xc0 then
-        return NULL
+        return msgpack.NULL
     elseif c == 0xc2 then
         return false
     elseif c == 0xc3 then
@@ -515,7 +524,9 @@ end
 --------------------------------------------------------------------------------
 
 return {
-    NULL = NULL;
+    NULL = msgpack.NULL;
+    array_mt = msgpack.array_mt;
+    map_mt = msgpack.map_mt;
     encode = encode;
     on_encode = on_encode;
     decode_unchecked = decode_unchecked;

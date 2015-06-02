@@ -1,5 +1,7 @@
 --# set connection default
 box.schema.user.grant('guest', 'replication')
+box.schema.func.create('_set_pri_lsn')
+box.schema.user.grant('guest', 'execute', 'function', '_set_pri_lsn')
 --# create server hot_standby with script='replication/hot_standby.lua', rpl_master=default
 --# create server replica with rpl_master=default, script='replication/replica.lua'
 --# start server hot_standby
@@ -31,17 +33,20 @@ do
     function _insert(_begin, _end)
         local a = {}
         for i = _begin, _end do
-            table.insert(a, box.space['tweedledum']:insert{i, 'the tuple '..i})
+            table.insert(a, box.space.tweedledum:insert{i, 'the tuple '..i})
         end
-        return unpack(a)
+        return a
     end
 
     function _select(_begin, _end)
         local a = {}
         for i = _begin, _end do
-            table.insert(a, box.space['tweedledum']:get{i})
+            local tuple = box.space.tweedledum:get{i}
+            if tuple ~= nil then
+                table.insert(a, tuple)
+            end
         end
-        return unpack(a)
+        return a
     end
 
     function _wait_lsn(_lsnd)
@@ -57,6 +62,9 @@ box.info.status
 --# set connection default
 box.info.status
 
+space = box.schema.space.create('tweedledum')
+index = space:create_index('primary', { type = 'hash' })
+
 -- set begin lsn on master, replica and hot_standby.
 --# set variable replica_port to 'replica.listen'
 REPLICA = require('uri').parse(tostring(replica_port))
@@ -64,9 +72,6 @@ REPLICA ~= nil
 a = (require 'net.box'):new(REPLICA.host, REPLICA.service)
 a:call('_set_pri_lsn', box.info.server.id, box.info.server.lsn)
 a:close()
-
-space = box.schema.create_space('tweedledum')
-index = space:create_index('primary', { type = 'hash' })
 
 _insert(1, 10)
 _select(1, 10)
@@ -94,7 +99,7 @@ _insert(11, 20)
 _select(11, 20)
 
 --# set connection replica
-_wait_lsn(12)
+_wait_lsn(10)
 _select(11, 20)
 
 --# stop server hot_standby

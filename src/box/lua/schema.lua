@@ -22,8 +22,19 @@ ffi.cdef[[
     };
     size_t
     boxffi_index_len(uint32_t space_id, uint32_t index_id);
+    size_t
+    boxffi_index_bsize(uint32_t space_id, uint32_t index_id);
     struct tuple *
     boxffi_index_random(uint32_t space_id, uint32_t index_id, uint32_t rnd);
+    struct tuple *
+    boxffi_index_get(uint32_t space_id, uint32_t index_id, const char *key);
+    struct tuple *
+    boxffi_index_min(uint32_t space_id, uint32_t index_id, const char *key);
+    struct tuple *
+    boxffi_index_max(uint32_t space_id, uint32_t index_id, const char *key);
+    ssize_t
+    boxffi_index_count(uint32_t space_id, uint32_t index_id, int type,
+                       const char *key);
     struct iterator *
     boxffi_index_iterator(uint32_t space_id, uint32_t index_id, int type,
                   const char *key);
@@ -45,16 +56,13 @@ ffi.cdef[[
     port_ffi_destroy(struct port_ffi *port);
 
     int
-    boxffi_select(struct port *port, uint32_t space_id, uint32_t index_id,
+    boxffi_select(struct port_ffi *port, uint32_t space_id, uint32_t index_id,
               int iterator, uint32_t offset, uint32_t limit,
               const char *key, const char *key_end);
     void password_prepare(const char *password, int len,
 		                  char *out, int out_len);
     int
     boxffi_txn_begin();
-
-    int
-    boxffi_txn_commit();
 
     void
     boxffi_txn_rollback();
@@ -202,11 +210,8 @@ box.begin = function()
         box.error()
     end
 end
-box.commit = function()
-    if ffi.C.boxffi_txn_commit() == -1 then
-        box.error()
-    end
-end
+-- box.commit yields, so it's defined in call.cc
+
 box.rollback = ffi.C.boxffi_txn_rollback;
 
 box.schema.space = {}
@@ -238,12 +243,16 @@ box.schema.space.create = function(name, options)
     end
     local id = options.id
     if not id then
-        id = _space.index[0]:max()[1]
-        if id < box.schema.SYSTEM_ID_MAX then
-            id = box.schema.SYSTEM_ID_MAX + 1
-        else
-            id = id + 1
+        local _schema = box.space._schema
+        local max_id = _schema:update({'max_id'}, {{'+', 2, 1}})
+        if max_id == nil then
+            id = _space.index.primary:max()[1]
+            if id < box.schema.SYSTEM_ID_MAX then
+                id = box.schema.SYSTEM_ID_MAX
+            end
+            max_id = _schema:insert{'max_id', id + 1}
         end
+        id = max_id[2]
     end
     local uid = nil
     if options.user then
@@ -272,7 +281,7 @@ end
 
 box.schema.create_space = box.schema.space.create
 
-box.schema.space.drop = function(space_id)
+box.schema.space.drop = function(space_id, space_name)
     check_param(space_id, 'space_id', 'number')
 
     local _space = box.space[box.schema.SPACE_ID]
@@ -288,7 +297,10 @@ box.schema.space.drop = function(space_id)
         box.schema.user.revoke(tuple[2], tuple[5], tuple[3], tuple[4])
     end
     if _space:delete{space_id} == nil then
-        box.error(box.error.NO_SUCH_SPACE, '#'..tostring(space_id))
+        if space_name == nil then
+            space_name = '#'..tostring(space_id)
+        end
+        box.error(box.error.NO_SUCH_SPACE, space_name)
     end
 end
 
@@ -482,34 +494,6 @@ local function keify(key)
     return {key}
 end
 
---
--- Change one-based indexing in update commands to zero-based.
---
-local function normalize_update_ops(ops)
-    if type(ops) ~= 'table' then
-        return ops;
-    end
-    for _, op in ipairs(ops) do
-        if type(op) == 'table' then
-            if op[1] == ':' then
-                -- fix offset for splice
-                if op[3] > 0 then
-                    op[3] = op[3] - 1
-                elseif op[3] == 0 then
-                    box.error(box.error.SPLICE, op[2], "offset is out of bound")
-                end
-            end
-            if op[2] > 0 then
-               op[2] = op[2] - 1
-            elseif op[2] == 0 then
-               box.error(box.error.NO_SUCH_FIELD, op[2])
-            end
-        end
-    end
-    return ops
-end
-internal.normalize_update_ops = normalize_update_ops -- export for net.box
-
 local iterator_t = ffi.typeof('struct iterator')
 ffi.metatype(iterator_t, {
     __tostring = function(iterator)
@@ -544,7 +528,9 @@ local iterator_gen = function(param, state)
     end
     -- next() modifies state in-place
     local tuple = builtin.boxffi_iterator_next(state)
-    if tuple ~= nil then
+    if tuple == ffi.cast('void *', -1) then
+        return box.error() -- error
+    elseif tuple ~= nil then
         return state, box.tuple.bless(tuple) -- new state, value
     else
         return nil
@@ -559,7 +545,41 @@ end
 local port = ffi.new('struct port_ffi')
 builtin.port_ffi_create(port)
 ffi.gc(port, builtin.port_ffi_destroy)
-local port_t = ffi.typeof('struct port *')
+
+-- Helper function for nicer error messages
+-- in some cases when space object is misused
+-- Takes time so should not be used for DML.
+local function space_object_check(space)
+        if type(space) ~= 'table' then
+            space = { name = space }
+        end
+        local s = box.space[space.id]
+        if s == nil then
+            box.error(box.error.NO_SUCH_SPACE, space.name)
+        end
+end
+
+local function check_iterator_type(opts, key_is_nil)
+    local itype
+    if opts and opts.iterator then
+        if type(opts.iterator) == "number" then
+            itype = opts.iterator
+        elseif type(opts.iterator) == "string" then
+            itype = box.index[string.upper(opts.iterator)]
+            if itype == nil then
+                box.error(box.error.ITERATOR_TYPE, opts.iterator)
+            end
+        else
+            box.error(box.error.ITERATOR_TYPE, tostring(opts.iterator))
+        end
+    else
+        -- Use ALL for {} and nil keys and EQ for other keys
+        itype = key_is_nil and box.index.ALL or box.index.EQ
+    end
+    return itype
+end
+
+internal.check_iterator_type = check_iterator_type -- export for net.box
 
 function box.schema.space.bless(space)
     local index_mt = {}
@@ -571,29 +591,37 @@ function box.schema.space.bless(space)
         end
         return tonumber(ret)
     end
+    -- index.bsize
+    index_mt.bsize = function(index)
+        local ret = builtin.boxffi_index_bsize(index.space_id, index.id)
+        if ret == -1 then
+            box.error()
+        end
+        return tonumber(ret)
+    end
     index_mt.__len = index_mt.len -- Lua 5.2 compatibility
     index_mt.__newindex = function(table, index)
         return error('Attempt to modify a read-only table') end
     index_mt.__index = index_mt
     -- min and max
     index_mt.min = function(index, key)
-        if index.type ~= 'TREE' then
-            box.error(box.error.UNSUPPORTED, index.type, 'min()')
-        end
-        local lst = index:select(key, { iterator = 'GE', limit = 1 })[1]
-        if lst ~= nil then
-            return lst
+        local pkey = msgpackffi.encode_tuple(key)
+        local tuple = builtin.boxffi_index_min(index.space_id, index.id, pkey)
+        if tuple == ffi.cast('void *', -1) then
+            box.error() -- error
+        elseif tuple ~= nil then
+            return box.tuple.bless(tuple)
         else
             return
         end
     end
     index_mt.max = function(index, key)
-        if index.type ~= 'TREE' then
-            box.error(box.error.UNSUPPORTED, index.type, 'max()')
-        end
-        local lst = index:select(key, { iterator = 'LE', limit = 1 })[1]
-        if lst ~= nil then
-            return lst
+        local pkey = msgpackffi.encode_tuple(key)
+        local tuple = builtin.boxffi_index_max(index.space_id, index.id, pkey)
+        if tuple == ffi.cast('void *', -1) then
+            box.error() -- error
+        elseif tuple ~= nil then
+            return box.tuple.bless(tuple)
         else
             return
         end
@@ -606,27 +634,13 @@ function box.schema.space.bless(space)
         elseif tuple ~= nil then
             return box.tuple.bless(tuple)
         else
-            return nil
+            return
         end
     end
     -- iteration
     index_mt.pairs = function(index, key, opts)
         local pkey, pkey_end = msgpackffi.encode_tuple(key)
-        -- Use ALL for {} and nil keys and EQ for other keys
-        local itype = pkey + 1 < pkey_end and box.index.EQ or box.index.ALL
-
-        if opts and opts.iterator then
-            if type(opts.iterator) == "number" then
-                itype = opts.iterator
-            elseif type(opts.iterator) == "string" then
-                itype = box.index[string.upper(opts.iterator)]
-                if itype == nil then
-                    box.error(box.error.ITERATOR_TYPE, opts.iterator)
-                end
-            else
-                box.error(box.error.ITERATOR_TYPE, tostring(opts.iterator))
-            end
-        end
+        local itype = check_iterator_type(opts, pkey + 1 >= pkey_end);
 
         local keybuf = ffi.string(pkey, pkey_end - pkey)
         local cdata = builtin.boxffi_index_iterator(index.space_id, index.id,
@@ -641,24 +655,14 @@ function box.schema.space.bless(space)
     index_mt.__ipairs = index_mt.pairs -- Lua 5.2 compatibility
     -- index subtree size
     index_mt.count = function(index, key, opts)
-        local count = 0
-        local iterator
-
-        if opts and opts.iterator ~= nil then
-            iterator = opts.iterator
-        else
-            iterator = 'EQ'
+        local pkey, pkey_end = msgpackffi.encode_tuple(key)
+        local itype = check_iterator_type(opts, pkey + 1 >= pkey_end);
+        local count = builtin.boxffi_index_count(index.space_id, index.id,
+            itype, pkey);
+        if count == -1 then
+            box.error()
         end
-
-        if key == nil or type(key) == "table" and #key == 0 then
-            return index:len()
-        end
-
-        local state, tuple
-        for state, tuple in index:pairs(key, { iterator = iterator }) do
-            count = count + 1
-        end
-        return count
+        return tonumber(count)
     end
 
     local function check_index(space, index_id)
@@ -669,63 +673,45 @@ function box.schema.space.bless(space)
 
     index_mt.get = function(index, key)
         local key, key_end = msgpackffi.encode_tuple(key)
-        port.size = 0;
-        if builtin.boxffi_select(ffi.cast(port_t, port), index.space_id,
-           index.id, box.index.EQ, 0, 2, key, key_end) ~=0 then
-            return box.error()
-        end
-        if port.size == 0 then
-            return
-        elseif port.size == 1 then
-            return box.tuple.bless(port.ret[0])
+        local tuple = builtin.boxffi_index_get(index.space_id, index.id, key)
+        if tuple == ffi.cast('void *', -1) then
+            return box.error() -- error
+        elseif tuple ~= nil then
+            return box.tuple.bless(tuple)
         else
-            box.error(box.error.MORE_THAN_ONE_TUPLE)
+            return
         end
     end
 
     index_mt.select = function(index, key, opts)
         local offset = 0
         local limit = 4294967295
-        local iterator = box.index.EQ
 
         local key, key_end = msgpackffi.encode_tuple(key)
-        if key_end == key + 1 then -- empty array
-            iterator = box.index.ALL
-        end
+        local iterator = check_iterator_type(opts, key + 1 >= key_end)
 
         if opts ~= nil then
             if opts.offset ~= nil then
                 offset = opts.offset
-            end
-            if type(opts.iterator) == "string" then
-                local resolved_iter = box.index[string.upper(opts.iterator)]
-                if resolved_iter == nil then
-                    box.error(box.error.ITERATOR_TYPE, opts.iterator);
-                end
-                opts.iterator = resolved_iter
-            end
-            if opts.iterator ~= nil then
-                iterator = opts.iterator
             end
             if opts.limit ~= nil then
                 limit = opts.limit
             end
         end
 
-        port.size = 0;
-        if builtin.boxffi_select(ffi.cast(port_t, port), index.space_id,
+        if builtin.boxffi_select(port, index.space_id,
             index.id, iterator, offset, limit, key, key_end) ~=0 then
             return box.error()
         end
 
         local ret = {}
         for i=0,port.size - 1,1 do
-            table.insert(ret, box.tuple.bless(port.ret[i]))
+            -- tuple.bless must never fail
+            ret[i + 1] = box.tuple.bless(port.ret[i])
         end
         return ret
     end
     index_mt.update = function(index, key, ops)
-        ops = normalize_update_ops(ops)
         return internal.update(index.space_id, index.id, keify(key), ops);
     end
     index_mt.delete = function(index, key)
@@ -857,20 +843,22 @@ function box.schema.space.bless(space)
         return box.schema.space.format(space.id, format)
     end
     space_mt.drop = function(space)
-        return box.schema.space.drop(space.id)
+        return box.schema.space.drop(space.id, space.name)
     end
     space_mt.rename = function(space, name)
+        space_object_check(space)
         return box.schema.space.rename(space.id, name)
     end
     space_mt.create_index = function(space, name, options)
+        space_object_check(space)
         return box.schema.index.create(space.id, name, options)
     end
     space_mt.run_triggers = function(space, yesno)
-        local space = ffi.C.space_by_id(space.id)
-        if space == nil then
+        local s = ffi.C.space_by_id(space.id)
+        if s == nil then
             box.error(box.error.NO_SUCH_SPACE, space.name)
         end
-        ffi.C.space_run_triggers(space, yesno)
+        ffi.C.space_run_triggers(s, yesno)
     end
     space_mt.__index = space_mt
 
@@ -901,6 +889,14 @@ local function privilege_resolve(privilege)
         numeric = privilege
     end
     return numeric
+end
+
+local function checked_privilege(privilege, object_type)
+    local priv_hex = privilege_resolve(privilege)
+    if object_type == 'role' and priv_hex ~= 4 then
+        box.error(box.error.UNSUPPORTED_ROLE_PRIV, privilege)
+    end
+    return priv_hex
 end
 
 local function privilege_name(privilege)
@@ -979,21 +975,42 @@ end
 
 box.schema.func = {}
 box.schema.func.create = function(name, opts)
+    opts = opts or {}
+    check_param_table(opts, { setuid = 'boolean', if_not_exists = 'boolean' })
     local _func = box.space[box.schema.FUNC_ID]
     local func = _func.index.name:get{name}
     if func then
+        if not opts.if_not_exists then
             box.error(box.error.FUNCTION_EXISTS, name)
+        end
+        return
     end
-    check_param_table(opts, { setuid = 'boolean' })
     opts = update_param_table(opts, { setuid = false })
     opts.setuid = opts.setuid and 1 or 0
     _func:auto_increment{session.uid(), name, opts.setuid}
 end
 
-box.schema.func.drop = function(name)
+box.schema.func.drop = function(name, opts)
+    opts = opts or {}
+    check_param_table(opts, { if_exists = 'boolean' })
     local _func = box.space[box.schema.FUNC_ID]
     local _priv = box.space[box.schema.PRIV_ID]
-    local fid = object_resolve('function', name)
+    local fid
+    local tuple
+    if type(name) == 'string' then
+        tuple = _func.index.name:get{name}
+    else
+        tuple = _func:get{name}
+    end
+    if tuple then
+        fid = tuple[1]
+    end
+    if fid == nil then
+        if not opts.if_exists then
+            box.error(box.error.NO_SUCH_FUNCTION, name)
+        end
+        return
+    end
     local privs = _priv.index.object:select{'function', fid}
     for k, tuple in pairs(privs) do
         box.schema.user.revoke(tuple[2], tuple[5], tuple[3], tuple[4])
@@ -1030,7 +1047,7 @@ end
 
 box.schema.user.passwd = function(name, new_password)
     if name == nil then
-        error('Usage: box.schema.user.passwd([user,] password)')
+        box.error(box.error.PROC_LUA, "Usage: box.schema.user.passwd([user,] password)")
     end
     if new_password == nil then
         -- change password for current user
@@ -1048,11 +1065,13 @@ end
 
 box.schema.user.create = function(name, opts)
     local uid = user_or_role_resolve(name)
+    opts = opts or {}
+    check_param_table(opts, { password = 'string', if_not_exists = 'boolean' })
     if uid then
-        box.error(box.error.USER_EXISTS, name)
-    end
-    if opts == nil then
-        opts = {}
+        if not opts.if_not_exists then
+            box.error(box.error.USER_EXISTS, name)
+        end
+        return
     end
     auth_mech_list = {}
     if opts.password then
@@ -1072,35 +1091,8 @@ box.schema.user.exists = function(name)
     end
 end
 
-box.schema.user.drop = function(name)
-    local uid = user_or_role_resolve(name)
-    if uid == nil then
-        box.error(box.error.NO_SUCH_USER, name)
-    end
-    -- recursive delete of user data
-    local _priv = box.space[box.schema.PRIV_ID]
-    local privs = _priv.index.primary:select{uid}
-    for k, tuple in pairs(privs) do
-        box.schema.user.revoke(uid, tuple[5], tuple[3], tuple[4])
-    end
-    local spaces = box.space[box.schema.SPACE_ID].index.owner:select{uid}
-    for k, tuple in pairs(spaces) do
-        box.space[tuple[1]]:drop()
-    end
-    local funcs = box.space[box.schema.FUNC_ID].index.owner:select{uid}
-    for k, tuple in pairs(funcs) do
-        box.schema.func.drop(tuple[1])
-    end
-    -- if this is a role, revoke this role from whoever it was granted to
-    grants = _priv.index.object:select{'role', uid}
-    for k, tuple in pairs(grants) do
-        box.schema.user.revoke(tuple[2], uid)
-    end
-    box.space[box.schema.USER_ID]:delete{uid}
-end
-
-box.schema.user.grant = function(user_name, privilege, object_type,
-                                 object_name, options)
+local function grant(uid, name, privilege, object_type, 
+                     object_name, options)
     -- From user point of view, role is the same thing
     -- as a privilege. Allow syntax grant(user, role).
     if object_name == nil and object_type == nil then
@@ -1108,16 +1100,10 @@ box.schema.user.grant = function(user_name, privilege, object_type,
         -- named 'execute'
         object_type = 'role'
         object_name = privilege
-    end
-    -- sanitize privilege type for role object type
-    if object_type == 'role' then
         privilege = 'execute'
     end
-    local uid = user_or_role_resolve(user_name)
-    if uid == nil then
-        box.error(box.error.NO_SUCH_USER, user_name)
-    end
-    privilege_hex = privilege_resolve(privilege)
+    local privilege_hex = checked_privilege(privilege, object_type)
+
     local oid = object_resolve(object_type, object_name)
     if options == nil then
         options = {}
@@ -1147,28 +1133,24 @@ box.schema.user.grant = function(user_name, privilege, object_type,
         _priv:replace{options.grantor, uid, object_type, oid, privilege_hex}
     elseif options.if_not_exists == false then
             if object_type == 'role' then
-                box.error(box.error.ROLE_GRANTED, user_name, object_name)
+                box.error(box.error.ROLE_GRANTED, name, object_name)
             else
-                box.error(box.error.PRIV_GRANTED, user_name, privilege,
+                box.error(box.error.PRIV_GRANTED, name, privilege,
                           object_type, object_name)
             end
     end
 end
 
-box.schema.user.revoke = function(user_name, privilege, object_type, object_name, options)
+local function revoke(uid, name, privilege, object_type, object_name, options)
     -- From user point of view, role is the same thing
     -- as a privilege. Allow syntax revoke(user, role).
     if object_name == nil and object_type == nil then
         object_type = 'role'
         object_name = privilege
-        -- revoke everything possible from role,
-        -- to prevent stupid mistakes with privilege name
-        privilege = 'read,write,execute'
+        privilege = 'execute'
     end
-    local uid = user_or_role_resolve(user_name)
-    if uid == nil then
-        box.error(box.error.NO_SUCH_USER, name)
-    end
+    local privilege_hex = checked_privilege(privilege, object_type)
+
     if options == nil then
         options = {}
     end
@@ -1183,25 +1165,73 @@ box.schema.user.revoke = function(user_name, privilege, object_type, object_name
             return
         end
         if object_type == 'role' then
-            box.error(box.error.ROLE_NOT_GRANTED, user_name, object_name)
+            box.error(box.error.ROLE_NOT_GRANTED, name, object_name)
         else
-            box.error(box.error.PRIV_NOT_GRANTED, user_name, privilege,
+            box.error(box.error.PRIV_NOT_GRANTED, name, privilege,
                       object_type, object_name)
         end
     end
-    privilege = privilege_resolve(privilege)
     local old_privilege = tuple[5]
     local grantor = tuple[1]
     -- sic:
     -- a user may revoke more than he/she granted
     -- (erroneous user input)
     --
-    privilege = bit.band(old_privilege, bit.bnot(privilege))
-    if privilege ~= 0 then
-        _priv:replace{grantor, uid, object_type, oid, privilege}
+    privilege_hex = bit.band(old_privilege, bit.bnot(privilege_hex))
+    if privilege_hex ~= 0 then
+        _priv:replace{grantor, uid, object_type, oid, privilege_hex}
     else
         _priv:delete{uid, object_type, oid}
     end
+end
+
+local function drop(uid, opts)
+    -- recursive delete of user data
+    local _priv = box.space[box.schema.PRIV_ID]
+    local privs = _priv.index.primary:select{uid}
+    for k, tuple in pairs(privs) do
+        revoke(uid, uid, tuple[5], tuple[3], tuple[4])
+    end
+    local spaces = box.space[box.schema.SPACE_ID].index.owner:select{uid}
+    for k, tuple in pairs(spaces) do
+        box.space[tuple[1]]:drop()
+    end
+    local funcs = box.space[box.schema.FUNC_ID].index.owner:select{uid}
+    for k, tuple in pairs(funcs) do
+        box.schema.func.drop(tuple[1])
+    end
+    -- if this is a role, revoke this role from whoever it was granted to
+    grants = _priv.index.object:select{'role', uid}
+    for k, tuple in pairs(grants) do
+        revoke(tuple[2], tuple[2], uid)
+    end
+    box.space[box.schema.USER_ID]:delete{uid}
+end
+
+box.schema.user.grant = function(user_name, ...)
+    local uid = user_resolve(user_name)
+    if uid == nil then
+        box.error(box.error.NO_SUCH_USER, user_name)
+    end
+    return grant(uid, user_name, ...)
+end
+
+box.schema.user.revoke = function(user_name, ...)
+    local uid = user_resolve(user_name)
+    if uid == nil then
+        box.error(box.error.NO_SUCH_USER, user_name)
+    end
+    return revoke(uid, user_name, ...)
+end
+
+box.schema.user.drop = function(name, opts)
+    opts = opts or {}
+    check_param_table(opts, { if_exists = 'boolean' })
+    local uid = user_resolve(name)
+    if uid == nil then
+        box.error(box.error.NO_SUCH_USER, name)
+    end
+    return drop(uid, opts)
 end
 
 box.schema.user.info = function(user_name)
@@ -1234,38 +1264,60 @@ box.schema.role.exists = function(name)
     end
 end
 
-box.schema.role.create = function(name)
+box.schema.role.create = function(name, opts)
+    opts = opts or {}
+    check_param_table(opts, { if_not_exists = 'boolean' })
     local uid = user_or_role_resolve(name)
     if uid then
-        box.error(box.error.ROLE_EXISTS, name)
+        if not opts.if_not_exists then
+            box.error(box.error.ROLE_EXISTS, name)
+        end
+        return
     end
     local _user = box.space[box.schema.USER_ID]
     _user:auto_increment{session.uid(), name, 'role'}
 end
 
-box.schema.role.drop = function(name)
-    local uid = user_or_role_resolve(name)
+box.schema.role.drop = function(name, opts)
+    opts = opts or {}
+    check_param_table(opts, { if_exists = 'boolean' })
+    local uid = role_resolve(name)
     if uid == nil then
-        box.error(box.error.NO_SUCH_ROLE, name)
+        if not opts.if_exists then
+            box.error(box.error.NO_SUCH_ROLE, name)
+        end
+        return
     end
-    return box.schema.user.drop(name)
+    return drop(uid)
 end
-box.schema.role.grant = function(user_name, privilege, object_type,
-                                 object_name, grantor)
-    local uid = user_or_role_resolve(user_name)
+box.schema.role.grant = function(user_name, ...)
+    local uid = role_resolve(user_name)
     if uid == nil then
         box.error(box.error.NO_SUCH_ROLE, user_name)
     end
-    return box.schema.user.grant(user_name, privilege, object_type,
-                                 object_name, grantor)
+    return grant(uid, user_name, ...)
 end
-box.schema.role.revoke = function(user_name, privilege, object_type,
-                                  object_name)
-    local uid = user_or_role_resolve(user_name)
+box.schema.role.revoke = function(user_name, ...)
+    local uid = role_resolve(user_name)
     if uid == nil then
         box.error(box.error.NO_SUCH_ROLE, user_name)
     end
-    return box.schema.user.revoke(user_name, privilege, object_type,
-                                  object_name)
+    return revoke(uid, user_name, ...)
 end
 box.schema.role.info = box.schema.user.info
+
+-- 
+-- once
+--
+box.once = function(key, func, ...)
+    if type(key) ~= 'string' or type(func) ~= 'function' then
+        box.error(box.error.ILLEGAL_PARAMS, "Usage: box.once(key, func, ...)")
+    end
+    
+    local key = "once"..key
+    if box.space._schema:get{key} ~= nil then
+        return
+    end
+    box.space._schema:put{key}
+    return func(...)
+end

@@ -31,7 +31,7 @@
 #include "box.h"
 #include "tuple.h"
 #include "space.h"
-#include <tarantool.h>
+#include "main.h"
 #include "cluster.h"
 #include "recovery.h"
 #include <fiber.h>
@@ -52,9 +52,8 @@ static void
 txn_add_redo(struct txn_stmt *stmt, struct request *request)
 {
 	stmt->row = request->header;
-	if (recovery->wal_mode == WAL_NONE || request->header != NULL)
+	if (request->header != NULL)
 		return;
-
 	/* Create a redo log row for Lua requests */
 	struct xrow_header *row= (struct xrow_header *)
 		region_alloc0(&fiber()->gc, sizeof(struct xrow_header));
@@ -63,46 +62,14 @@ txn_add_redo(struct txn_stmt *stmt, struct request *request)
 	stmt->row = row;
 }
 
-static void
-txn_on_yield_or_stop(struct trigger * /* trigger */, void * /* event */)
-{
-	txn_rollback(); /* doesn't throw */
-}
-
 void
 txn_replace(struct txn *txn, struct space *space,
 	    struct tuple *old_tuple, struct tuple *new_tuple,
 	    enum dup_replace_mode mode)
 {
-	struct txn_stmt *stmt;
-	stmt = txn_stmt(txn);
 	assert(old_tuple || new_tuple);
-	/*
-	 * Remember the old tuple only if we replaced it
-	 * successfully, to not remove a tuple inserted by
-	 * another transaction in rollback().
-	 */
-	stmt->old_tuple = space_replace(space, old_tuple, new_tuple, mode);
-	if (new_tuple) {
-		stmt->new_tuple = new_tuple;
-		tuple_ref(stmt->new_tuple);
-	}
-	stmt->space = space;
 
-	/* Memtx doesn't allow yields between statements of
-	 * a transaction. Set a trigger which would roll
-	 * back the transaction if there is a yield.
-	 */
-	if (txn->autocommit == false) {
-		if (txn->n_stmts == 1) {
-			if (engine_no_yield(txn->engine->flags)) {
-				trigger_add(&fiber()->on_yield,
-					    &txn->fiber_on_yield);
-				trigger_add(&fiber()->on_stop,
-					    &txn->fiber_on_stop);
-			}
-		}
-	}
+	space->handler->replace(txn, space, old_tuple, new_tuple, mode);
 
 	/*
 	 * Run on_replace triggers. For now, disallow mutation
@@ -116,16 +83,16 @@ txn_replace(struct txn *txn, struct space *space,
 static struct txn_stmt *
 txn_stmt_new(struct txn *txn)
 {
+	assert(txn->stmt == 0);
 	assert(txn->n_stmts == 0 || !txn->autocommit);
-	struct txn_stmt *stmt;
 	if (txn->n_stmts++ == 1) {
-		stmt = &txn->stmt;
+		txn->stmt = &txn->first_stmt;
 	} else {
-		stmt = (struct txn_stmt *)
+		txn->stmt = (struct txn_stmt *)
 			region_alloc0(&fiber()->gc, sizeof(struct txn_stmt));
 	}
-	rlist_add_tail_entry(&txn->stmts, stmt, next);
-	return stmt;
+	rlist_add_tail_entry(&txn->stmts, txn->stmt, next);
+	return txn->stmt;
 }
 
 struct txn *
@@ -137,42 +104,9 @@ txn_begin(bool autocommit)
 	rlist_create(&txn->stmts);
 	rlist_create(&txn->on_commit);
 	rlist_create(&txn->on_rollback);
-	txn->fiber_on_yield = {
-		rlist_nil, txn_on_yield_or_stop, NULL, NULL
-	};
-	txn->fiber_on_stop = {
-		rlist_nil, txn_on_yield_or_stop, NULL, NULL
-	};
 	txn->autocommit = autocommit;
 	fiber_set_txn(fiber(), txn);
 	return txn;
-}
-
-static void
-txn_engine_begin_stmt(struct txn *txn, struct space *space)
-{
-	assert(txn->n_stmts >= 1);
-	/**
-	 * Notify storage engine about the transaction.
-	 * Ensure various storage engine constraints:
-	 * a. check if it supports multi-statement transactions
-	 * b. only one engine can be used in a multi-statement
-	 *    transaction
-	 */
-	Engine *engine = space->handler->engine;
-	if (txn->n_stmts == 1) {
-		/* First statement. */
-		txn->engine = engine;
-		if (txn->autocommit == false) {
-			if (! engine_transactional(engine->flags))
-				tnt_raise(ClientError, ER_UNSUPPORTED,
-				          space->def.engine_name, "transactions");
-		}
-	} else {
-		if (txn->engine->id != engine_id(space->handler))
-			tnt_raise(ClientError, ER_CROSS_ENGINE_TRANSACTION);
-	}
-	engine->begin(txn, space);
 }
 
 struct txn *
@@ -181,28 +115,23 @@ txn_begin_stmt(struct request *request, struct space *space)
 	struct txn *txn = in_txn();
 	if (txn == NULL)
 		txn = txn_begin(true);
-	struct txn_stmt *stmt = txn_stmt_new(txn);
-	txn_add_redo(stmt, request);
-	txn_engine_begin_stmt(txn, space);
-	return txn;
-}
 
-void
-txn_commit_stmt(struct txn *txn, struct port *port)
-{
-	struct txn_stmt *stmt;
-	struct tuple *tuple;
-	stmt = txn_stmt(txn);
-	if (txn->autocommit)
-		txn_commit(txn);
-	/* Adding result to port must be after possible WAL write.
-	 * The reason is that any yield between port_add_tuple and port_eof
-	 * calls could lead to sending not finished response to iproto socket.
-	 */
-	if ((tuple = stmt->new_tuple) || (tuple = stmt->old_tuple))
-		port_add_tuple(port, tuple);
-	if (txn->autocommit)
-		txn_finish(txn);
+	Engine *engine = space->handler->engine;
+	if (txn->engine == NULL) {
+		assert(txn->n_stmts == 0);
+		txn->engine = engine;
+	} else if (txn->engine != engine) {
+		/**
+		 * Only one engine can be used in
+		 * a multi-statement transaction currently.
+		 */
+		tnt_raise(ClientError, ER_CROSS_ENGINE_TRANSACTION);
+	}
+	struct txn_stmt *stmt = txn_stmt_new(txn);
+	if (space_is_temporary(space) == false)
+		txn_add_redo(stmt, request);
+	engine->beginStatement(txn);
+	return txn;
 }
 
 void
@@ -210,17 +139,14 @@ txn_commit(struct txn *txn)
 {
 	assert(txn == in_txn());
 	struct txn_stmt *stmt;
-	/* if (!txn->autocommit && txn->n_stmts && engine_no_yield(txn->engine)) */
 
-	trigger_clear(&txn->fiber_on_yield);
-	trigger_clear(&txn->fiber_on_stop);
+	/* Do transaction conflict resolving */
+	if (txn->engine)
+		txn->engine->prepare(txn);
 
 	rlist_foreach_entry(stmt, &txn->stmts, next) {
-		if ((!stmt->old_tuple && !stmt->new_tuple) ||
-		    space_is_temporary(stmt->space))
+		if (stmt->row == NULL)
 			continue;
-		/* txn_commit() must be done after txn_add_redo() */
-		assert(recovery->wal_mode == WAL_NONE || stmt->row != NULL);
 		ev_tstamp start = ev_now(loop()), stop;
 		int64_t res = wal_write(recovery, stmt->row);
 		stop = ev_now(loop());
@@ -233,19 +159,15 @@ txn_commit(struct txn *txn)
 			tnt_raise(LoggedError, ER_WAL_IO);
 		txn->signature = res;
 	}
+
+	/*
+	 * The transaction is in the binary log. No action below
+	 * may throw. In case an error has happened, there is
+	 * no other option but terminate.
+	 */
+	trigger_run(&txn->on_commit, txn);
 	if (txn->engine)
 		txn->engine->commit(txn);
-	trigger_run(&txn->on_commit, txn); /* must not throw. */
-}
-
-void
-txn_finish(struct txn *txn)
-{
-	struct txn_stmt *stmt;
-	rlist_foreach_entry(stmt, &txn->stmts, next) {
-		if (stmt->old_tuple)
-			tuple_unref(stmt->old_tuple);
-	}
 	TRASH(txn);
 	/** Free volatile txn memory. */
 	fiber_gc();
@@ -266,16 +188,11 @@ txn_rollback_stmt()
 		return;
 	if (txn->autocommit)
 		return txn_rollback();
-	struct txn_stmt *stmt = txn_stmt(txn);
-	if (stmt->old_tuple || stmt->new_tuple) {
-		space_replace(stmt->space, stmt->new_tuple,
-			      stmt->old_tuple, DUP_INSERT);
-		if (stmt->new_tuple)
-			tuple_unref(stmt->new_tuple);
-	}
-	stmt->old_tuple = stmt->new_tuple = NULL;
-	stmt->space = NULL;
-	stmt->row = NULL;
+	if (txn->stmt == NULL)
+		return;
+	txn->engine->rollbackStatement(txn->stmt);
+	txn->stmt->row = NULL;
+	txn->stmt = NULL;
 }
 
 void
@@ -284,17 +201,9 @@ txn_rollback()
 	struct txn *txn = in_txn();
 	if (txn == NULL)
 		return;
+	trigger_run(&txn->on_rollback, txn); /* must not throw. */
 	if (txn->engine)
 		txn->engine->rollback(txn);
-	trigger_run(&txn->on_rollback, txn); /* must not throw. */
-	struct txn_stmt *stmt;
-	rlist_foreach_entry(stmt, &txn->stmts, next) {
-		if (stmt->new_tuple)
-			tuple_unref(stmt->new_tuple);
-	}
-	/* if (!txn->autocommit && txn->n_stmts && engine_no_yield(txn->engine)) */
-		trigger_clear(&txn->fiber_on_yield);
-		trigger_clear(&txn->fiber_on_stop);
 	TRASH(txn);
 	/** Free volatile txn memory. */
 	fiber_gc();
@@ -321,27 +230,6 @@ boxffi_txn_begin()
 		(void) txn_begin(false);
 	} catch (Exception  *e) {
 		return -1; /* pass exception  through FFI */
-	}
-	return 0;
-}
-
-int
-boxffi_txn_commit()
-{
-	try {
-		struct txn *txn = in_txn();
-		/**
-		 * COMMIT is like BEGIN or ROLLBACK
-		 * a "transaction-initiating statement".
-		 * Do nothing if transaction is not started,
-		 * it's the same as BEGIN + COMMIT.
-		 */
-		if (txn) {
-			txn_commit(txn);
-			txn_finish(txn);
-		}
-	} catch (Exception  *e) {
-		return -1; /* pass exception through FFI */
 	}
 	return 0;
 }

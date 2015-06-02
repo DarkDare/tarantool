@@ -38,7 +38,7 @@ extern "C" {
 #include "box/replica.h"
 #include "box/recovery.h"
 #include "box/cluster.h"
-#include "tarantool.h"
+#include "main.h"
 #include "box/box.h"
 #include "lua/utils.h"
 #include "fiber.h"
@@ -85,8 +85,7 @@ lbox_info_server(struct lua_State *L)
 	lua_pushlstring(L, tt_uuid_str(&recovery->server_uuid), UUID_STR_LEN);
 	lua_settable(L, -3);
 	lua_pushliteral(L, "lsn");
-	luaL_pushinumber64(L, vclock_get(&recovery->vclock,
-					 recovery->server_id));
+	luaL_pushint64(L, vclock_get(&recovery->vclock, recovery->server_id));
 	lua_settable(L, -3);
 	lua_pushliteral(L, "ro");
 	lua_pushboolean(L, box_is_ro());
@@ -101,9 +100,11 @@ lbox_info_vclock(struct lua_State *L)
 	lua_createtable(L, 0, vclock_size(&recovery->vclock));
 	/* Request compact output flow */
 	luaL_setmaphint(L, -1);
-	vclock_foreach(&recovery->vclock, it) {
-		lua_pushinteger(L, it.id);
-		luaL_pushnumber64(L, it.lsn);
+	struct vclock_iterator it;
+	vclock_iterator_init(&it, &recovery->vclock);
+	vclock_foreach(&it, server) {
+		lua_pushinteger(L, server.id);
+		luaL_pushuint64(L, server.lsn);
 		lua_settable(L, -3);
 	}
 
@@ -121,13 +122,6 @@ static int
 lbox_info_uptime(struct lua_State *L)
 {
 	lua_pushnumber(L, (unsigned)tarantool_uptime() + 1);
-	return 1;
-}
-
-static int
-lbox_info_snapshot_pid(struct lua_State *L)
-{
-	lua_pushnumber(L, snapshot_pid);
 	return 1;
 }
 
@@ -170,7 +164,6 @@ lbox_info_dynamic_meta [] =
 	{"replication", lbox_info_replication},
 	{"status", lbox_info_status},
 	{"uptime", lbox_info_uptime},
-	{"snapshot_pid", lbox_info_snapshot_pid},
 	{"pid", lbox_info_pid},
 #if 0
 	{"sophia", lbox_info_sophia},
@@ -230,7 +223,7 @@ box_lua_info_init(struct lua_State *L)
 		{NULL, NULL}
 	};
 
-	luaL_register(L, "box.info", infolib);
+	luaL_register_module(L, "box.info", infolib);
 
 	lua_newtable(L);		/* metatable for info */
 

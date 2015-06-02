@@ -30,6 +30,7 @@
  */
 #include <stdbool.h>
 #include <netinet/in.h>
+#include <sys/socket.h>
 
 #include "trivia/util.h"
 #include "third_party/tarantool_ev.h"
@@ -61,19 +62,6 @@ enum wal_mode { WAL_NONE = 0, WAL_WRITE, WAL_FSYNC, WAL_MODE_MAX };
 /** String constants for the supported modes. */
 extern const char *wal_mode_STRS[];
 
-/** State of a replication relay. */
-struct relay {
-	/** Replica connection */
-	int sock;
-	/* Request type - SUBSCRIBE or JOIN */
-	uint32_t type;
-	/* Request sync */
-	uint64_t sync;
-	/* Only used in SUBSCRIBE request */
-	uint32_t server_id;
-	struct vclock vclock;
-};
-
 enum { REMOTE_SOURCE_MAXLEN = 1024 }; /* enough to fit URI with passwords */
 
 /** State of a replication connection to the master */
@@ -91,42 +79,20 @@ struct remote {
 	socklen_t addr_len;
 };
 
-/**
- * This is used in local hot standby or replication
- * relay mode: look for changes in the wal_dir and apply them
- * locally or send to the replica.
- */
-struct wal_watcher {
-	/**
-	 * Rescan the WAL directory in search for new WAL files
-	 * every wal_dir_rescan_delay seconds.
-	 */
-	ev_timer dir_timer;
-	/**
-	 * When the latest WAL does not contain a EOF marker,
-	 * re-read its tail on every change in file metadata.
-	 */
-	ev_stat stat;
-	/** Path to the file being watched with 'stat'. */
-	char filename[PATH_MAX+1];
-};
-
 struct recovery_state {
 	struct vclock vclock;
 	/** The WAL we're currently reading/writing from/to. */
 	struct xlog *current_wal;
 	struct xdir snap_dir;
 	struct xdir wal_dir;
-	/** Used to find missing xlog files */
-	int64_t signature;
 	struct wal_writer *writer;
-	struct wal_watcher watcher;
-	union {
-		/** slave->master state */
-		struct remote remote;
-		/** master->slave state */
-		struct relay relay;
-	};
+	/**
+	 * This is used in local hot standby or replication
+	 * relay mode: look for changes in the wal_dir and apply them
+	 * locally or send to the replica.
+	 */
+	struct fiber *watcher;
+	struct remote remote;
 	/**
 	 * apply_row is a module callback invoked during initial
 	 * recovery and when reading rows from the master.
@@ -137,8 +103,6 @@ struct recovery_state {
 	enum wal_mode wal_mode;
 	struct tt_uuid server_uuid;
 	uint32_t server_id;
-
-	bool finalize;
 };
 
 struct recovery_state *
@@ -147,6 +111,10 @@ recovery_new(const char *snap_dirname, const char *wal_dirname,
 
 void
 recovery_delete(struct recovery_state *r);
+
+/* to be called at exit */
+void
+recovery_exit(struct recovery_state *r);
 
 void
 recovery_atfork(struct recovery_state *r);
@@ -162,9 +130,15 @@ recovery_has_data(struct recovery_state *r)
 	       vclockset_first(&r->wal_dir.index) != NULL;
 }
 void recovery_bootstrap(struct recovery_state *r);
-void recover_snap(struct recovery_state *r);
-void recovery_follow_local(struct recovery_state *r, ev_tstamp wal_dir_rescan_delay);
-void recovery_finalize(struct recovery_state *r, int rows_per_wal);
+void
+recover_xlog(struct recovery_state *r, struct xlog *l);
+void recovery_follow_local(struct recovery_state *r,
+			   const char *name,
+			   ev_tstamp wal_dir_rescan_delay);
+void recovery_stop_local(struct recovery_state *r);
+
+void recovery_finalize(struct recovery_state *r, enum wal_mode mode,
+		       int rows_per_wal);
 
 int64_t wal_write(struct recovery_state *r, struct xrow_header *packet);
 

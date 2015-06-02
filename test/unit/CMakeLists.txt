@@ -6,7 +6,7 @@ include_directories(${PROJECT_SOURCE_DIR}/src)
 include_directories(${PROJECT_BINARY_DIR}/src)
 include_directories(${PROJECT_SOURCE_DIR}/src/lib)
 include_directories(${CMAKE_SOURCE_DIR}/third_party)
-add_executable(rlist.test rlist.c unit.c ${CMAKE_SOURCE_DIR}/src/lib/salad/rlist.c)
+add_executable(rlist.test rlist.c unit.c)
 add_executable(uri.test uri.c unit.c ${CMAKE_SOURCE_DIR}/src/uri.c)
 add_executable(fiob.test unit.c fiob.c ${CMAKE_SOURCE_DIR}/src/fiob.c)
 add_executable(queue.test queue.c)
@@ -17,6 +17,7 @@ add_executable(rope_avl.test rope_avl.c ${CMAKE_SOURCE_DIR}/src/lib/salad/rope.c
 add_executable(rope_stress.test rope_stress.c ${CMAKE_SOURCE_DIR}/src/lib/salad/rope.c)
 add_executable(rope.test rope.c ${CMAKE_SOURCE_DIR}/src/lib/salad/rope.c)
 add_executable(bit.test bit.c bit.c)
+add_executable(int96.test int96.cc)
 target_link_libraries(bit.test bit)
 add_executable(bitset_basic.test bitset_basic.c)
 target_link_libraries(bitset_basic.test bitset)
@@ -63,6 +64,9 @@ target_link_libraries(fiber.test core)
 
 add_executable(fiber_stress.test fiber_stress.cc)
 target_link_libraries(fiber_stress.test core)
+
+add_executable(ipc.test ipc.cc ${CMAKE_SOURCE_DIR}/src/ipc.cc)
+target_link_libraries(ipc.test core)
 
 add_executable(coio.test coio.cc unit.c
         ${CMAKE_SOURCE_DIR}/src/sio.cc

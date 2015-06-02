@@ -38,6 +38,8 @@
 #define RB_COMPACT 1
 #include <third_party/rb.h>
 
+#include "bit/bit.h"
+
 #if defined(__cplusplus)
 extern "C" {
 #endif /* defined(__cplusplus) */
@@ -46,6 +48,9 @@ enum { VCLOCK_MAX = 16 };
 
 /** Cluster vector clock */
 struct vclock {
+	/** Map of used components in lsn array */
+	unsigned int map;
+	/** Sum of all components of vclock. */
 	int64_t signature;
 	int64_t lsn[VCLOCK_MAX];
 	/** To order binary logs by vector clock. */
@@ -58,22 +63,45 @@ struct vclock_c {
 	int64_t lsn;
 };
 
-#define vclock_foreach(vclock, var) \
-	for (struct vclock_c (var) = {0, 0}; \
-	     (var).id < VCLOCK_MAX; (var).id++) \
-		if (((var).lsn = (vclock)->lsn[(var).id]) >= 0)
+struct vclock_iterator
+{
+	struct bit_iterator it;
+	const struct vclock *vclock;
+};
+
+static inline void
+vclock_iterator_init(struct vclock_iterator *it, const struct vclock *vclock)
+{
+	it->vclock = vclock;
+	bit_iterator_init(&it->it, &vclock->map, sizeof(vclock->map), true);
+}
+
+static inline struct vclock_c
+vclock_iterator_next(struct vclock_iterator *it)
+{
+	struct vclock_c c;
+	size_t id = bit_iterator_next(&it->it);
+	c.id = id == SIZE_MAX ? (int) VCLOCK_MAX : id;
+	if (c.id < VCLOCK_MAX)
+		c.lsn = it->vclock->lsn[c.id];
+	return c;
+}
+
+
+#define vclock_foreach(it, var) \
+	for (struct vclock_c (var) = vclock_iterator_next(it); \
+	     (var).id < VCLOCK_MAX; (var) = vclock_iterator_next(it))
 
 static inline void
 vclock_create(struct vclock *vclock)
 {
-	memset(vclock, 0xff, sizeof(*vclock));
-	vclock->signature = 0;
+	memset(vclock, 0, sizeof(*vclock));
 }
 
 static inline bool
 vclock_has(const struct vclock *vclock, uint32_t server_id)
 {
-	return server_id < VCLOCK_MAX && vclock->lsn[server_id] >= 0;
+	return server_id < VCLOCK_MAX && (vclock->map & (1 << server_id));
 }
 
 static inline int64_t
@@ -99,25 +127,30 @@ vclock_copy(struct vclock *dst, const struct vclock *src)
 static inline uint32_t
 vclock_size(const struct vclock *vclock)
 {
-	int32_t size = 0;
-	vclock_foreach(vclock, pair)
-		++size;
-	return size;
+	return __builtin_popcount(vclock->map);
 }
 
 static inline int64_t
-vclock_sum(const struct vclock *vclock)
+vclock_calc_sum(const struct vclock *vclock)
 {
 	int64_t sum = 0;
-	vclock_foreach(vclock, server)
+	struct vclock_iterator it;
+	vclock_iterator_init(&it, vclock);
+	vclock_foreach(&it, server)
 		sum += server.lsn;
 	return sum;
 }
 
 static inline int64_t
-vclock_signature(const struct vclock *vclock)
+vclock_sum(const struct vclock *vclock)
 {
 	return vclock->signature;
+}
+
+static inline void
+vclock_add_server_nothrow(struct vclock *vclock, uint32_t server_id)
+{
+	vclock->map |= 1 << server_id;
 }
 
 int64_t
@@ -159,9 +192,15 @@ static inline int
 vclock_compare(const struct vclock *a, const struct vclock *b)
 {
 	bool le = true, ge = true;
-	for (uint32_t server_id = 0; server_id < VCLOCK_MAX; server_id++) {
-		int64_t lsn_a = vclock_get(a, server_id);
-		int64_t lsn_b = vclock_get(b, server_id);
+	unsigned int map = a->map | b->map;
+	struct bit_iterator it;
+	bit_iterator_init(&it, &map, sizeof(map), true);
+
+	for (size_t server_id = bit_iterator_next(&it); server_id < VCLOCK_MAX;
+	     server_id = bit_iterator_next(&it)) {
+
+		int64_t lsn_a = a->lsn[server_id];
+		int64_t lsn_b = b->lsn[server_id];
 		le = le && lsn_a <= lsn_b;
 		ge = ge && lsn_a >= lsn_b;
 		if (!ge && !le)
@@ -181,21 +220,38 @@ typedef rb_tree(struct vclock) vclockset_t;
 rb_proto(, vclockset_, vclockset_t, struct vclock);
 
 /**
- * @brief Inclusive search
- * @param set
- * @param key
+ * A proximity search in a set of vclock objects.
+ *
+ * The set is normally the index of vclocks in the binary
+ * log files of the current directory. The task of the search is
+ * to find the first log,
+ *
  * @return a vclock that <= than \a key
  */
 static inline struct vclock *
-vclockset_isearch(vclockset_t *set, struct vclock *key)
+vclockset_match(vclockset_t *set, struct vclock *key)
 {
-	struct vclock *res = vclockset_psearch(set, key);
-	while (res != NULL) {
-		if (vclock_compare(res, key) <= 0)
-			return res;
-		res = vclockset_prev(set, res);
+	struct vclock *match = vclockset_psearch(set, key);
+	/**
+	 * vclockset comparator returns 0 for
+	 * incomparable keys, rendering them equal.
+	 * So the match, even when found, is not necessarily
+	 * strictly preceding the search key, it may be
+	 * incomparable. If this is the case, unwind until we get
+	 * to a key which is strictly below the search pattern.
+	 */
+	while (match != NULL) {
+		if (vclock_compare(match, key) <= 0)
+			return match;
+		/* The order is undefined, try the previous vclock. */
+		match = vclockset_prev(set, match);
 	}
-	return NULL;
+	/*
+	 * There is no xlog which is strictly less than the search
+	 * pattern. Return the first log - it is either
+	 * strictly greater, or incomparable with the key.
+	 */
+	return vclockset_first(set);
 }
 
 #if defined(__cplusplus)
@@ -225,17 +281,18 @@ static inline void
 vclock_add_server(struct vclock *vclock, uint32_t server_id)
 {
 	if (server_id >= VCLOCK_MAX)
-		tnt_raise(ClientError, ER_REPLICA_MAX, server_id);
+		tnt_raise(LoggedError, ER_REPLICA_MAX, server_id);
 	assert(! vclock_has(vclock, server_id));
-	vclock->lsn[server_id] = 0;
+	vclock_add_server_nothrow(vclock, server_id);
 }
 
 static inline void
 vclock_del_server(struct vclock *vclock, uint32_t server_id)
 {
 	assert(vclock_has(vclock, server_id));
-	vclock->lsn[server_id] = -1;
-	vclock->signature = vclock_sum(vclock);
+	vclock->lsn[server_id] = 0;
+	vclock->map &= ~(1 << server_id);
+	vclock->signature = vclock_calc_sum(vclock);
 }
 
 #endif /* defined(__cplusplus) */

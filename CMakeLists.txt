@@ -44,7 +44,6 @@ include(GNUInstallDirs)
 
 include(cmake/utils.cmake)
 include(cmake/pod2man.cmake)
-
 # the order is significant: we need to know os and compiler to configure libs
 include(cmake/arch.cmake)
 include(cmake/os.cmake)
@@ -52,6 +51,7 @@ include(cmake/compiler.cmake)
 include(cmake/simd.cmake)
 include(cmake/profile.cmake)
 include(cmake/FindReadline.cmake)
+include(cmake/FindSphinx.cmake)
 include(cmake/systemd.cmake)
 
 if (NOT READLINE_FOUND)
@@ -85,7 +85,15 @@ endif()
 check_function_exists(open_memstream HAVE_OPEN_MEMSTREAM)
 check_function_exists(fmemopen HAVE_FMEMOPEN)
 check_function_exists(funopen HAVE_FUNOPEN)
+check_function_exists(fopencookie HAVE_FOPENCOOKIE)
 check_function_exists(uuidgen HAVE_UUIDGEN)
+
+# Checks for libev
+include(CheckStructHasMember)
+check_struct_has_member("struct stat" "st_mtim" "sys/stat.h"
+    HAVE_STRUCT_STAT_ST_MTIM)
+check_struct_has_member("struct stat" "st_mtimensec" "sys/stat.h"
+    HAVE_STRUCT_STAT_ST_MTIMENSEC)
 
 #
 # Some versions of GNU libc define non-portable __libc_stack_end
@@ -104,7 +112,7 @@ add_custom_target(tags COMMAND ctags -R -f tags
 #
 set (CPACK_PACKAGE_VERSION_MAJOR "1")
 set (CPACK_PACKAGE_VERSION_MINOR "6")
-set (CPACK_PACKAGE_VERSION_PATCH "4")
+set (CPACK_PACKAGE_VERSION_PATCH "5")
 
 set (PACKAGE_VERSION "")
 
@@ -363,8 +371,6 @@ configure_file(
     "${PROJECT_SOURCE_DIR}/src/trivia/config.h.cmake"
     "${PROJECT_BINARY_DIR}/src/trivia/config.h"
     )
-install(FILES ${PROJECT_BINARY_DIR}/src/trivia/config.h
-    DESTINATION ${MODULE_INCLUDEDIR})
 message (STATUS "")
 message (STATUS "Tarantool configuration is complete:")
 message (STATUS "")

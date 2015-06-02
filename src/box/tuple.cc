@@ -28,12 +28,14 @@
  */
 #include "tuple.h"
 
+#include <stdio.h>
+
 #include "small/small.h"
 #include "small/quota.h"
 
 #include "key_def.h"
 #include "tuple_update.h"
-#include <stdio.h>
+#include "errinj.h"
 
 /** Global table of tuple formats */
 struct tuple_format **tuple_formats;
@@ -77,7 +79,8 @@ field_type_create(enum field_type *types, uint32_t field_count,
 			if (*ptype != UNKNOWN && *ptype != part->type) {
 				tnt_raise(ClientError,
 					  ER_FIELD_TYPE_MISMATCH,
-					  key_def->iid, part - key_def->parts,
+					  key_def->name,
+					  part - key_def->parts + INDEX_OFFSET,
 					  field_type_strs[part->type],
 					  field_type_strs[*ptype]);
 			}
@@ -217,7 +220,8 @@ tuple_format_new(struct rlist *key_list)
  * format data.
  */
 void
-tuple_init_field_map(struct tuple_format *format, struct tuple *tuple, uint32_t *field_map)
+tuple_init_field_map(struct tuple_format *format, struct tuple *tuple,
+		     uint32_t *field_map)
 {
 	if (format->field_count == 0)
 		return; /* Nothing to initialize */
@@ -241,7 +245,8 @@ tuple_init_field_map(struct tuple_format *format, struct tuple *tuple, uint32_t 
 		enum mp_type mp_type = mp_typeof(*pos);
 		mp_next(&pos);
 
-		key_mp_type_validate(*type, mp_type, ER_FIELD_TYPE, i);
+		key_mp_type_validate(*type, mp_type, ER_FIELD_TYPE,
+				     i + INDEX_OFFSET);
 
 		if (*offset < 0 && *offset != INT32_MIN)
 			field_map[*offset] = d - tuple->data;
@@ -261,8 +266,21 @@ tuple_init_field_map(struct tuple_format *format, struct tuple *tuple, uint32_t 
 struct tuple *
 tuple_alloc(struct tuple_format *format, size_t size)
 {
+	ERROR_INJECT_EXCEPTION(ERRINJ_TUPLE_ALLOC);
 	size_t total = sizeof(struct tuple) + size + format->field_map_size;
-	char *ptr = (char *) smalloc(&memtx_alloc, total, "tuple");
+	char *ptr = (char *) smalloc_nothrow(&memtx_alloc, total);
+	/**
+	 * Use a nothrow version and throw an exception here,
+	 * to throw an instance of ClientError. Apart from being
+	 * more nice to the user, ClientErrors are ignored in
+	 * panic_on_wal_error=false mode, allowing us to start
+	 * with lower arena than necessary in the circumstances
+	 * of disaster recovery.
+	 */
+	if (ptr == NULL) {
+		tnt_raise(LoggedError, ER_MEMORY_ISSUE,
+			  total, "slab allocator", "tuple");
+	}
 	struct tuple *tuple = (struct tuple *)(ptr + format->field_map_size);
 
 	tuple->refs = 0;
@@ -353,7 +371,7 @@ tuple_next_cstr(struct tuple_iterator *it)
 	if (field == NULL)
 		tnt_raise(ClientError, ER_NO_SUCH_FIELD, fieldno);
 	if (mp_typeof(*field) != MP_STR)
-		tnt_raise(ClientError, ER_FIELD_TYPE, fieldno,
+		tnt_raise(ClientError, ER_FIELD_TYPE, fieldno + INDEX_OFFSET,
 			  field_type_strs[STRING]);
 	uint32_t len = 0;
 	const char *str = mp_decode_str(&field, &len);
@@ -373,7 +391,7 @@ tuple_field_cstr(struct tuple *tuple, uint32_t i)
 	if (field == NULL)
 		tnt_raise(ClientError, ER_NO_SUCH_FIELD, i);
 	if (mp_typeof(*field) != MP_STR)
-		tnt_raise(ClientError, ER_FIELD_TYPE, i,
+		tnt_raise(ClientError, ER_FIELD_TYPE, i + INDEX_OFFSET,
 			  field_type_strs[STRING]);
 	uint32_t len = 0;
 	const char *str = mp_decode_str(&field, &len);
@@ -531,7 +549,8 @@ void
 tuple_init(float tuple_arena_max_size, uint32_t objsize_min,
 	   uint32_t objsize_max, float alloc_factor)
 {
-	tuple_format_ber = tuple_format_new(&rlist_nil);
+	RLIST_HEAD(empty_list);
+	tuple_format_ber = tuple_format_new(&empty_list);
 	/* Make sure this one stays around. */
 	tuple_format_ref(tuple_format_ber, 1);
 
@@ -625,7 +644,8 @@ double mp_decode_num(const char **data, uint32_t i)
 		val = mp_decode_double(data);
 		break;
 	default:
-		tnt_raise(ClientError, ER_FIELD_TYPE, i, field_type_strs[NUM]);
+		tnt_raise(ClientError, ER_FIELD_TYPE, i + INDEX_OFFSET,
+			  field_type_strs[NUM]);
 	}
 	return val;
 }

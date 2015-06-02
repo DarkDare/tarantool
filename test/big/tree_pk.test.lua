@@ -1,13 +1,17 @@
 dofile('utils.lua')
 
-s0 = box.schema.create_space('tweedledum')
+s0 = box.schema.space.create('tweedledum')
 i0 = s0:create_index('primary', { type = 'tree', parts = {1, 'num'}, unique = true })
+
+bsize = i0:bsize()
 
 -- integer keys
 s0:insert{1, 'tuple'}
 box.snapshot()
 s0:insert{2, 'tuple 2'}
 box.snapshot()
+
+i0:bsize() > bsize
 
 s0:insert{3, 'tuple 3'}
 s0.index['primary']:get{1}
@@ -25,10 +29,10 @@ s0:insert{'xxxxxxx'}
 s0:insert{''}
 s0:insert{'12'}
 
-s1 = box.schema.create_space('tweedledee')
+s1 = box.schema.space.create('tweedledee')
 i1 = s1:create_index('primary', { type = 'tree', parts = {1, 'str'}, unique = true })
 
-s2 = box.schema.create_space('alice')
+s2 = box.schema.space.create('alice')
 i2 = s2:create_index('primary', { type = 'tree', parts = {1, 'str'}, unique = true })
 
 -- string keys
@@ -195,3 +199,4 @@ box.sort(s0.index['i2']:select(0))
 
 s0:drop()
 s0 = nil
+

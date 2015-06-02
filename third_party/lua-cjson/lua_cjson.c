@@ -946,10 +946,10 @@ static void json_process_value(lua_State *l, json_parse_t *json,
         lua_pushlstring(l, token->value.string, token->string_len);
         break;;
     case T_UINT:
-        luaL_pushnumber64(l, token->value.ival);
+        luaL_pushuint64(l, token->value.ival);
         break;;
     case T_INT:
-        luaL_pushinumber64(l, token->value.ival);
+        luaL_pushint64(l, token->value.ival);
         break;;
     case T_NUMBER:
         luaL_checkfinite(l, json->cfg, token->value.number);
@@ -1027,7 +1027,7 @@ const luaL_reg jsonlib[] = {
 static int
 json_new(lua_State *L)
 {
-    luaL_newserializer(L, jsonlib);
+    luaL_newserializer(L, NULL, jsonlib);
     return 1;
 }
 
@@ -1035,8 +1035,9 @@ int
 luaopen_json(lua_State *L)
 {
     json_create_tokens();
-    luaL_json_default = luaL_newserializer(L, jsonlib);
-    luaL_register_module(L, "json", NULL);
+    luaL_json_default = luaL_newserializer(L, "json", jsonlib);
+    luaL_pushnull(L);
+    lua_setfield(L, -2, "null"); /* compatibility with cjson */
     return 1;
 }
 

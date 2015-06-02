@@ -37,7 +37,6 @@ public:
 	~SophiaIndex();
 
 	virtual size_t size() const;
-	virtual struct tuple *random(uint32_t rnd) const;
 	virtual struct tuple *findByKey(const char *key, uint32_t part_count) const;
 	virtual struct tuple *replace(struct tuple *old_tuple,
 				      struct tuple *new_tuple,
@@ -46,23 +45,10 @@ public:
 	virtual void initIterator(struct iterator *iterator,
 				  enum iterator_type type,
 				  const char *key, uint32_t part_count) const;
-	virtual size_t memsize() const;
+	virtual size_t bsize() const;
 
 	void *env;
 	void *db;
 };
-
-struct tuple *
-sophia_replace_recover(struct space*,
-                       struct tuple*, struct tuple*,
-                       enum dup_replace_mode);
-
-struct tuple *
-sophia_replace(struct space*,
-               struct tuple*, struct tuple*,
-               enum dup_replace_mode);
-
-void
-sophia_complete_recovery(struct space*);
 
 #endif /* TARANTOOL_BOX_SOPHIA_INDEX_H_INCLUDED */

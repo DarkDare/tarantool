@@ -60,10 +60,11 @@ key_validate(struct key_def *key_def, enum iterator_type type, const char *key,
 		/*
 		 * Zero key parts are allowed:
 		 * - for TREE index, all iterator types,
-		 * - ITERA_ALL iterator type, all index types
-		 * - ITER_GE iterator in HASH index (legacy)
+		 * - ITER_ALL iterator type, all index types
+		 * - ITER_GT iterator in HASH index (legacy)
 		 */
-		if (key_def->type == TREE || type == ITER_ALL)
+		if (key_def->type == TREE || type == ITER_ALL ||
+		    (key_def->type == HASH && type == ITER_GT))
 			return;
 		/* Fall through. */
 	}
@@ -152,6 +153,32 @@ Index::~Index()
 	key_def_delete(key_def);
 }
 
+size_t
+Index::size() const
+{
+	tnt_raise(ClientError, ER_UNSUPPORTED,
+		  index_type_strs[key_def->type],
+		  "size()");
+}
+
+struct tuple *
+Index::min(const char *key, uint32_t part_count) const
+{
+	struct iterator *it = position();
+	initIterator(it, ITER_GE, key, part_count);
+	IteratorGuard guard(it);
+	return it->next(it);
+}
+
+struct tuple *
+Index::max(const char *key, uint32_t part_count) const
+{
+	struct iterator *it = position();
+	initIterator(it, ITER_LE, key, part_count);
+	IteratorGuard guard(it);
+	return it->next(it);
+}
+
 struct tuple *
 Index::random(uint32_t rnd) const
 {
@@ -160,6 +187,21 @@ Index::random(uint32_t rnd) const
 		  index_type_strs[key_def->type],
 		  "random()");
 	return NULL;
+}
+
+size_t
+Index::count(enum iterator_type type, const char *key, uint32_t part_count) const
+{
+	if (type == ITER_ALL && key == NULL)
+		return size(); /* optimization */
+	struct iterator *it = position();
+	initIterator(it, type, key, part_count);
+	IteratorGuard guard(it);
+	size_t count = 0;
+	struct tuple *tuple = NULL;
+	while ((tuple = it->next(it)) != NULL)
+		++count;
+	return count;
 }
 
 struct tuple *
@@ -172,6 +214,38 @@ Index::findByTuple(struct tuple *tuple) const
 	return NULL;
 }
 
+size_t
+Index::bsize() const
+{
+	return 0;
+}
+
+/**
+ * Create a read view for iterator so further index modifications
+ * will not affect the iterator iteration.
+ */
+void
+Index::createReadViewForIterator(struct iterator *iterator)
+{
+	(void) iterator;
+	tnt_raise(ClientError, ER_UNSUPPORTED,
+		  index_type_strs[key_def->type],
+		  "consistent read view");
+}
+
+/**
+ * Destroy a read view of an iterator. Must be called for iterators,
+ * for which createReadViewForIterator was called.
+ */
+void
+Index::destroyReadViewForIterator(struct iterator *iterator)
+{
+	(void) iterator;
+	tnt_raise(ClientError, ER_UNSUPPORTED,
+		  index_type_strs[key_def->type],
+		  "consistent read view");
+}
+
 void
 index_build(Index *index, Index *pk)
 {
@@ -182,13 +256,14 @@ index_build(Index *index, Index *pk)
 	index->reserve(estimated_tuples);
 
 	if (n_tuples > 0) {
-		say_info("Adding %" PRIu32 " keys to %s index %"
-			 PRIu32 "...", n_tuples,
-			 index_type_strs[index->key_def->type], index_id(index));
+		say_info("Adding %" PRIu32 " keys to %s index '%s' ...",
+			 n_tuples, index_type_strs[index->key_def->type],
+			 index_name(index));
 	}
 
 	struct iterator *it = pk->position();
 	pk->initIterator(it, ITER_ALL, NULL, 0);
+	IteratorGuard it_guard(it);
 
 	struct tuple *tuple;
 	while ((tuple = it->next(it)))

@@ -3,9 +3,7 @@
 #
 enable_tnt_compile_flags()
 
-if (NOT TARGET_OS_DARWIN)
-    add_subdirectory(module)
-endif()
+add_subdirectory(trivia)
 
 include_directories(${LIBEV_INCLUDE_DIR})
 include_directories(${LIBEIO_INCLUDE_DIR})
@@ -25,7 +23,7 @@ lua_source(lua_sources lua/console.lua)
 lua_source(lua_sources lua/bsdsocket.lua)
 lua_source(lua_sources lua/errno.lua)
 lua_source(lua_sources lua/log.lua)
-lua_source(lua_sources lua/box_net_box.lua)
+lua_source(lua_sources lua/net_box.lua)
 lua_source(lua_sources lua/help.lua)
 lua_source(lua_sources lua/help_en_US.lua)
 lua_source(lua_sources lua/tap.lua)
@@ -145,11 +143,12 @@ set (common_libraries ${common_libraries} PARENT_SCOPE)
 
 add_subdirectory(lib)
 add_subdirectory(box)
+
 # Save CMAKE_XXX_FLAGS from this directory for config.h (used in --version)
 set(TARANTOOL_C_FLAGS ${CMAKE_C_FLAGS} PARENT_SCOPE)
 set(TARANTOOL_CXX_FLAGS ${CMAKE_CXX_FLAGS} PARENT_SCOPE)
 
-add_executable(tarantool tarantool.cc)
+add_executable(tarantool main.cc)
 add_dependencies(tarantool build_bundled_libs)
 target_link_libraries(tarantool box ${common_libraries})
 

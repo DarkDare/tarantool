@@ -30,6 +30,8 @@
 #include "say.h"
 #include "tuple.h"
 #include "memtx_engine.h"
+#include "space.h"
+#include "schema.h" /* space_cache_find() */
 #include "errinj.h"
 
 #include "third_party/PMurHash.h"
@@ -154,7 +156,7 @@ typedef uint32_t hash_t;
 struct hash_iterator {
 	struct iterator base; /* Must be the first member. */
 	struct light_index_core *hash_table;
-	uint32_t h_pos;
+	struct light_index_iterator hitr;
 };
 
 void
@@ -169,16 +171,24 @@ hash_iterator_ge(struct iterator *ptr)
 {
 	assert(ptr->free == hash_iterator_free);
 	struct hash_iterator *it = (struct hash_iterator *) ptr;
+	struct tuple **res = light_index_itr_get_and_next(it->hash_table,
+							  &it->hitr);
+	return res ? *res : 0;
+}
 
-	if (it->h_pos < it->hash_table->table_size) {
-		struct tuple *res = light_index_get(it->hash_table, it->h_pos);
-		it->h_pos++;
-		while (it->h_pos < it->hash_table->table_size
-		       && !light_index_pos_valid(it->hash_table, it->h_pos))
-			it->h_pos++;
-		return res;
-	}
-	return NULL;
+struct tuple *
+hash_iterator_gt(struct iterator *ptr)
+{
+	assert(ptr->free == hash_iterator_free);
+	ptr->next = hash_iterator_ge;
+	struct hash_iterator *it = (struct hash_iterator *) ptr;
+	struct tuple **res = light_index_itr_get_and_next(it->hash_table,
+							  &it->hitr);
+	if (!res)
+		return 0;
+	res = light_index_itr_get_and_next(it->hash_table,
+							  &it->hitr);
+	return res ? *res : 0;
 }
 
 static struct tuple *
@@ -231,9 +241,9 @@ MemtxHash::size() const
 }
 
 size_t
-MemtxHash::memsize() const
+MemtxHash::bsize() const
 {
-        return matras_extents_count(&hash_table->mtable) * HASH_INDEX_EXTENT_SIZE;
+        return matras_extent_count(&hash_table->mtable) * HASH_INDEX_EXTENT_SIZE;
 }
 
 struct tuple *
@@ -297,7 +307,9 @@ MemtxHash::replace(struct tuple *old_tuple, struct tuple *new_tuple,
 					      "recover of int hash_table");
 				}
 			}
-			tnt_raise(ClientError, errcode, index_id(this));
+			struct space *sp = space_cache_find(key_def->space_id);
+			tnt_raise(ClientError, errcode, index_name(this),
+				  space_name(sp));
 		}
 
 		if (dup_tuple)
@@ -306,9 +318,8 @@ MemtxHash::replace(struct tuple *old_tuple, struct tuple *new_tuple,
 
 	if (old_tuple) {
 		uint32_t h = tuple_hash(old_tuple, key_def);
-		hash_t slot = light_index_find(hash_table, h, old_tuple);
-		assert(slot != light_index_end);
-		light_index_delete(hash_table, slot);
+		int res = light_index_delete_value(hash_table, h, old_tuple);
+		assert(res == 0); (void) res;
 	}
 	return old_tuple;
 }
@@ -326,6 +337,8 @@ MemtxHash::allocIterator() const
 
 	it->base.next = hash_iterator_ge;
 	it->base.free = hash_iterator_free;
+	it->hash_table = hash_table;
+	light_index_itr_begin(it->hash_table, &it->hitr);
 	return (struct iterator *) it;
 }
 
@@ -338,19 +351,26 @@ MemtxHash::initIterator(struct iterator *ptr, enum iterator_type type,
 	assert(ptr->free == hash_iterator_free);
 
 	struct hash_iterator *it = (struct hash_iterator *) ptr;
-	it->hash_table = hash_table;
 
 	switch (type) {
+	case ITER_GT:
+		if (part_count != 0) {
+			light_index_itr_key(it->hash_table, &it->hitr,
+					    key_hash(key, key_def), key);
+			it->base.next = hash_iterator_gt;
+		} else {
+			light_index_itr_begin(it->hash_table, &it->hitr);
+			it->base.next = hash_iterator_ge;
+		}
+		break;
 	case ITER_ALL:
-		it->h_pos = 0;
-		while (it->h_pos < it->hash_table->table_size
-		       && !light_index_pos_valid(it->hash_table, it->h_pos))
-			it->h_pos++;
+		light_index_itr_begin(it->hash_table, &it->hitr);
 		it->base.next = hash_iterator_ge;
 		break;
 	case ITER_EQ:
 		assert(part_count > 0);
-		it->h_pos = light_index_find_key(hash_table, key_hash(key, key_def), key);
+		light_index_itr_key(it->hash_table, &it->hitr,
+				    key_hash(key, key_def), key);
 		it->base.next = hash_iterator_eq;
 		break;
 	default:
@@ -358,4 +378,27 @@ MemtxHash::initIterator(struct iterator *ptr, enum iterator_type type,
 			  "Hash index", "requested iterator type");
 	}
 }
+
+/**
+ * Create a read view for iterator so further index modifications
+ * will not affect the iterator iteration.
+ */
+void
+MemtxHash::createReadViewForIterator(struct iterator *iterator)
+{
+	struct hash_iterator *it = (struct hash_iterator *) iterator;
+	light_index_itr_freeze(it->hash_table, &it->hitr);
+}
+
+/**
+ * Destroy a read view of an iterator. Must be called for iterators,
+ * for which createReadViewForIterator was called.
+ */
+void
+MemtxHash::destroyReadViewForIterator(struct iterator *iterator)
+{
+	struct hash_iterator *it = (struct hash_iterator *) iterator;
+	light_index_itr_destroy(it->hash_table, &it->hitr);
+}
+
 /* }}} */

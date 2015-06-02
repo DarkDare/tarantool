@@ -1,7 +1,7 @@
 dofile('utils.lua')
 ---
 ...
-hash = box.schema.create_space('tweedledum')
+hash = box.schema.space.create('tweedledum')
 ---
 ...
 tmp = hash:create_index('primary', { type = 'hash', parts = {1, 'num', 2, 'str', 3, 'num'}, unique = true })
@@ -46,7 +46,7 @@ hash:insert{1, 'bar', 1, '', 4}
 -- try to insert a row with a duplicate key
 hash:insert{1, 'bar', 1, '', 5}
 ---
-- error: Duplicate key exists in unique index 0
+- error: Duplicate key exists in unique index 'primary' in space 'tweedledum'
 ...
 -- output all rows
 --# setopt delimiter ';'
@@ -89,7 +89,7 @@ hash.index['primary']:get{1, 'foo'}
 -- primary index select with extra part
 hash.index['primary']:get{1, 'foo', 0, 0}
 ---
-- error: Invalid key part count (expected [0..3], got 4)
+- error: Invalid key part count in an exact match (expected 3, got 4)
 ...
 -- primary index select with wrong type
 hash.index['primary']:get{1, 'foo', 'baz'}

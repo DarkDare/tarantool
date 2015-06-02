@@ -31,6 +31,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/types.h> /* ssize_t */
 
 struct lua_State;
 struct iterator;
@@ -48,9 +49,25 @@ boxffi_index_len(uint32_t space_id, uint32_t index_id);
 struct tuple *
 boxffi_index_random(uint32_t space_id, uint32_t index_id, uint32_t rnd);
 
+struct tuple *
+boxffi_index_get(uint32_t space_id, uint32_t index_id, const char *key);
+
+struct tuple *
+boxffi_index_min(uint32_t space_id, uint32_t index_id, const char *key);
+
+struct tuple *
+boxffi_index_max(uint32_t space_id, uint32_t index_id, const char *key);
+
+ssize_t
+boxffi_index_count(uint32_t space_id, uint32_t index_id, int type,
+		   const char *key);
+
 struct iterator *
 boxffi_index_iterator(uint32_t space_id, uint32_t index_id, int type,
 		      const char *key);
+
+size_t
+boxffi_index_bsize(uint32_t space_id, uint32_t index_id);
 
 struct tuple*
 boxffi_iterator_next(struct iterator *itr);

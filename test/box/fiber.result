@@ -1,7 +1,7 @@
 fiber = require('fiber')
 ---
 ...
-space = box.schema.create_space('tweedledum')
+space = box.schema.space.create('tweedledum')
 ---
 ...
 index = space:create_index('primary', { type = 'hash' })
@@ -141,34 +141,34 @@ space:insert{1953719668, 'old', 1684234849}
 -- test that insert produces a duplicate key error
 space:insert{1953719668, 'old', 1684234849}
 ---
-- error: Duplicate key exists in unique index 0
+- error: Duplicate key exists in unique index 'primary' in space 'tweedledum'
 ...
-space:update(1953719668, {{'=', 1, 1936941424}, {'=', 2, 'new'}})
+space:update(1953719668, {{'=', 1, 1953719668}, {'=', 2, 'new'}})
 ---
-- [1936941424, 'new', 1684234849]
+- [1953719668, 'new', 1684234849]
 ...
 space:update(1234567890, {{'+', 3, 1}})
 ---
 ...
-space:update(1936941424, {{'+', 3, 1}})
+space:update(1953719668, {{'+', 3, 1}})
 ---
-- [1936941424, 'new', 1684234850]
+- [1953719668, 'new', 1684234850]
 ...
-space:update(1936941424, {{'-', 3, 1}})
+space:update(1953719668, {{'-', 3, 1}})
 ---
-- [1936941424, 'new', 1684234849]
+- [1953719668, 'new', 1684234849]
 ...
-space:update(1936941424, {{'-', 3, 1}})
+space:update(1953719668, {{'-', 3, 1}})
 ---
-- [1936941424, 'new', 1684234848]
+- [1953719668, 'new', 1684234848]
 ...
-space:update(1936941424, {{'+', 3, 1}})
+space:update(1953719668, {{'+', 3, 1}})
 ---
-- [1936941424, 'new', 1684234849]
+- [1953719668, 'new', 1684234849]
 ...
-space:delete{1936941424}
+space:delete{1953719668}
 ---
-- [1936941424, 'new', 1684234849]
+- [1953719668, 'new', 1684234849]
 ...
 -- must be read-only
 space:insert{1953719668}
@@ -779,6 +779,24 @@ for fid, i in pairs(fiber.info()) do if i.name == 'zombie' then zombie = true en
 zombie
 ---
 - false
+...
+-- test case for gh-778 - fiber.id() on a dead fiber
+f =  fiber.create(function() end)
+---
+...
+id = f:id()
+---
+...
+fiber.sleep(0)
+---
+...
+f:status() 
+---
+- dead
+...
+id == f:id()
+---
+- true
 ...
 fiber = nil
 ---

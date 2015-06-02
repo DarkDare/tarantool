@@ -1,4 +1,34 @@
-space = box.schema.create_space('tweedledum')
+--# push filter 'table: .*' to 'table: <address>'
+-- gh-266: box.info() crash on uncofigured box
+package.loaded['box.space'] == nil
+---
+- true
+...
+package.loaded['box.index'] == nil
+---
+- true
+...
+package.loaded['box.tuple'] == nil
+---
+- true
+...
+package.loaded['box.error'] == nil
+---
+- true
+...
+package.loaded['box.info'] == nil
+---
+- true
+...
+package.loaded['box.stat'] == nil
+---
+- true
+...
+package.loaded['box.session'] == nil
+---
+- true
+...
+space = box.schema.space.create('tweedledum')
 ---
 ...
 index = space:create_index('primary', { type = 'hash' })
@@ -23,6 +53,7 @@ t
   - index
   - info
   - internal
+  - once
   - rollback
   - runtime
   - schema
@@ -41,6 +72,10 @@ t = nil
 ----------------
 --# stop server default
 --# start server default
+box.error.last()
+---
+- null
+...
 box.error({code = 123, reason = 'test'})
 ---
 - error: test
@@ -53,9 +88,25 @@ box.error()
 ---
 - error: Illegal parameters, bla bla
 ...
-box.error()
+box.error.raise()
 ---
 - error: Illegal parameters, bla bla
+...
+box.error.last()
+---
+- type: ClientError
+  message: Illegal parameters, bla bla
+  code: 1
+...
+box.error.clear()
+---
+...
+box.error.last()
+---
+- null
+...
+box.error.raise()
+---
 ...
 space = box.space.tweedledum
 ---
@@ -182,7 +233,8 @@ end;
 ...
 t;
 ---
-- - 'box.error.EXACT_MATCH : 19'
+- - 'box.error.CANT_UPDATE_PRIMARY_KEY : 94'
+  - 'box.error.EXACT_MATCH : 19'
   - 'box.error.NO_SUCH_TRIGGER : 34'
   - 'box.error.CLUSTER_ID_IS_RO : 65'
   - 'box.error.INDEX_TYPE : 13'
@@ -201,9 +253,14 @@ t;
   - 'box.error.DROP_USER : 44'
   - 'box.error.CROSS_ENGINE_TRANSACTION : 81'
   - 'box.error.MODIFY_INDEX : 14'
+  - 'box.error.TUPLE_FOUND : 3'
+  - 'box.error.FIELD_TYPE : 23'
   - 'box.error.PASSWORD_MISMATCH : 47'
+  - 'box.error.TRANSACTION_CONFLICT : 97'
   - 'box.error.NO_SUCH_ENGINE : 57'
+  - 'box.error.UNSUPPORTED_ROLE_PRIV : 98'
   - 'box.error.ACCESS_DENIED : 42'
+  - 'box.error.UPDATE_INTEGER_OVERFLOW : 95'
   - 'box.error.LAST_DROP : 15'
   - 'box.error.USER_EXISTS : 46'
   - 'box.error.WAL_IO : 40'
@@ -222,7 +279,7 @@ t;
   - 'box.error.ROLE_EXISTS : 83'
   - 'box.error.NO_SUCH_ROLE : 82'
   - 'box.error.NO_ACTIVE_TRANSACTION : 80'
-  - 'box.error.TUPLE_FOUND : 3'
+  - 'box.error.injection : table: <address>
   - 'box.error.FIELD_TYPE_MISMATCH : 24'
   - 'box.error.UNSUPPORTED : 5'
   - 'box.error.INVALID_MSGPACK : 20'
@@ -230,7 +287,7 @@ t;
   - 'box.error.ALTER_SPACE : 12'
   - 'box.error.ACTIVE_TRANSACTION : 79'
   - 'box.error.NO_CONNECTION : 77'
-  - 'box.error.FIELD_TYPE : 23'
+  - 'box.error.GUEST_USER_PASSWORD : 96'
   - 'box.error.INVALID_XLOG_NAME : 75'
   - 'box.error.INVALID_XLOG : 74'
   - 'box.error.REPLICA_MAX : 73'
@@ -293,7 +350,7 @@ pcall(myinsert, {1, 'hello'})
 pcall(myinsert, {1, 'hello'})
 ---
 - false
-- Duplicate key exists in unique index 0
+- Duplicate key exists in unique index 'primary' in space 'tweedledum'
 ...
 box.space.tweedledum:truncate()
 ---
@@ -539,3 +596,4 @@ space:delete{1}
 space:drop()
 ---
 ...
+--# clear filter

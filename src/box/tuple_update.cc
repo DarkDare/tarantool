@@ -35,6 +35,7 @@
 #include "salad/rope.h"
 #include "error.h"
 #include "msgpuck/msgpuck.h"
+#include "bit/int96.h"
 
 /** UPDATE request implementation.
  * UPDATE request is represented by a sequence of operations, each
@@ -42,13 +43,13 @@
  * add or remove fields. Only one operation on the same field
  * is allowed.
  *
- * Supported field change operations are: SET, ADD, bitwise AND,
- * XOR and OR, SPLICE.
+ * Supported field change operations are: SET, ADD, SUBTRACT;
+ * bitwise AND, XOR and OR; SPLICE.
  *
- * Supported tuple change operations are: SET (when SET field_no
- * == last_field_no + 1), DELETE, INSERT, PUSH and POP.
+ * Supported tuple change operations are: SET, DELETE, INSERT,
+ * PUSH and POP.
  * If the number of fields in a tuple is altered by an operation,
- * field index of all following operation is evaluated against the
+ * field index of all following operations is evaluated against the
  * new tuple.
  *
  * Despite the allowed complexity, a typical use case for UPDATE
@@ -84,7 +85,7 @@
  * In particular, if a field is deleted by an operation,
  * it disappears from the rope and all subsequent operations
  * on this field number instead affect the field following the
- * one.
+ * deleted one.
  */
 
 /** Update internal state */
@@ -104,8 +105,48 @@ struct op_set_arg {
 	const char *value;
 };
 
-/** Argument of ADD, AND, XOR, OR operations. */
+/**
+ * MsgPack format code of an arithmetic argument or result.
+ * MsgPack codes are not used to simplify type calculation.
+ */
+enum arith_type {
+	AT_DOUBLE = 0, /* MP_DOUBLE */
+	AT_FLOAT = 1, /* MP_FLOAT */
+	AT_INT = 2 /* MP_INT/MP_UINT */
+};
+
+/**
+ * Argument (left and right) and result of ADD, SUBTRACT.
+ *
+ * To perform an arithmetic operation, update first loads
+ * left and right arguments into corresponding value objects,
+ * then performs arithmetics on types of arguments, thus
+ * calculating the type of the result, and then
+ * performs the requested operation according to the calculated
+ * type rules.
+ *
+ * The rules are as follows:
+ * - when one of the argument types is double, the result is
+ *   double
+ * - when one of the argument types is float, the result is
+ *   float
+ * - for integer arguments, the result type code depends on
+ *   the range in which falls the result of the operation.
+ *   If the result is in negative range, it's MP_INT, otherwise
+ *   it's MP_UINT. If the result is out of bounds of (-2^63,
+ *   2^64), and exception is raised for overflow.
+ */
 struct op_arith_arg {
+	enum arith_type type;
+	union {
+		double dbl;
+		float flt;
+		struct int96_num int96;
+	};
+};
+
+/** Argument of AND, XOR, OR operations. */
+struct op_bit_arg {
 	uint64_t val;
 };
 
@@ -125,6 +166,7 @@ struct op_splice_arg {
 union update_op_arg {
 	struct op_set_arg set;
 	struct op_arith_arg arith;
+	struct op_bit_arg bit;
 	struct op_splice_arg splice;
 };
 
@@ -148,7 +190,7 @@ struct update_op {
 	const struct update_op_meta *meta;
 	union update_op_arg arg;
 	/* Subject field no. */
-	uint32_t field_no;
+	int32_t field_no;
 	uint32_t new_field_len;
 	uint8_t opcode;
 };
@@ -182,6 +224,7 @@ update_field_init(struct update_field *field,
 	field->tail_len = tail_len;
 }
 
+/** Read a field index or any other integer field. */
 static inline int64_t
 mp_read_int(struct tuple_update *update, struct update_op *op,
 	    const char **expr)
@@ -197,6 +240,85 @@ mp_read_int(struct tuple_update *update, struct update_op *op,
 	return field_no;
 }
 
+static inline uint64_t
+mp_read_uint(struct tuple_update *update, struct update_op *op,
+	     const char **expr)
+{
+	int64_t field_no;
+	if (mp_typeof(**expr) == MP_UINT)
+		field_no = mp_decode_uint(expr);
+	else
+		tnt_raise(ClientError, ER_ARG_TYPE, (char ) op->opcode,
+			  update->index_base + op->field_no, "UINT");
+	return field_no;
+}
+
+/**
+ * Load an argument of an arithmetic operation either from tuple
+ * or from the UPDATE command.
+ */
+static inline struct op_arith_arg
+mp_read_arith_arg(struct tuple_update *update, struct update_op *op,
+		  const char **expr)
+{
+	struct op_arith_arg result;
+	if (mp_typeof(**expr) == MP_UINT) {
+		result.type = AT_INT;
+		int96_set_unsigned(&result.int96, mp_decode_uint(expr));
+	} else if (mp_typeof(**expr) == MP_INT) {
+		result.type = AT_INT;
+		int96_set_signed(&result.int96, mp_decode_int(expr));
+	} else if (mp_typeof(**expr) == MP_DOUBLE) {
+		result.type = AT_DOUBLE;
+		result.dbl = mp_decode_double(expr);
+	} else if (mp_typeof(**expr) == MP_FLOAT) {
+		result.type = AT_FLOAT;
+		result.flt = mp_decode_float(expr);
+	} else {
+		tnt_raise(ClientError, ER_ARG_TYPE, (char ) op->opcode,
+			  update->index_base + op->field_no, "NUMBER");
+	}
+	return result;
+}
+
+static inline double
+cast_arith_arg_to_double(struct op_arith_arg arg)
+{
+	if (arg.type == AT_DOUBLE) {
+		return arg.dbl;
+	} else if (arg.type == AT_FLOAT) {
+		return arg.flt;
+	} else {
+		assert(arg.type == AT_INT);
+		if (int96_is_uint64(&arg.int96)) {
+			return int96_extract_uint64(&arg.int96);
+		} else {
+			assert(int96_is_neg_int64(&arg.int96));
+			return int96_extract_neg_int64(&arg.int96);
+		}
+	}
+}
+
+/** Return the MsgPack size of an arithmetic operation result. */
+static inline uint32_t
+mp_sizeof_op_arith_arg(struct op_arith_arg arg)
+{
+	if (arg.type == AT_INT) {
+		if (int96_is_uint64(&arg.int96)) {
+			uint64_t val = int96_extract_uint64(&arg.int96);
+			return mp_sizeof_uint(val);
+		} else {
+			int64_t val = int96_extract_neg_int64(&arg.int96);
+			return mp_sizeof_int(val);
+		}
+	} else if (arg.type == AT_DOUBLE) {
+		return mp_sizeof_double(arg.dbl);
+	} else {
+		assert(arg.type == AT_FLOAT);
+		return mp_sizeof_float(arg.flt);
+	}
+}
+
 static inline const char *
 mp_read_str(struct tuple_update *update, struct update_op *op,
 	    const char **expr, uint32_t *len)
@@ -209,22 +331,21 @@ mp_read_str(struct tuple_update *update, struct update_op *op,
 }
 
 static inline void
-op_check_field_no(struct tuple_update *update, uint32_t field_no,
-		  uint32_t field_max)
-{
-	if (field_no > field_max)
-		tnt_raise(ClientError, ER_NO_SUCH_FIELD, update->index_base +
-			  field_no);
-}
-
-static inline void
 op_adjust_field_no(struct tuple_update *update, struct update_op *op,
-		   uint32_t field_max)
+		   int32_t field_max)
 {
-	if (op->field_no == UINT32_MAX)
-		op->field_no = field_max;
-	else
-		op_check_field_no(update, op->field_no, field_max);
+	if (op->field_no >= 0) {
+		if (op->field_no < field_max)
+			return;
+		tnt_raise(ClientError, ER_NO_SUCH_FIELD, update->index_base +
+			op->field_no);
+	} else {
+		if (op->field_no + field_max >= 0) {
+			op->field_no += field_max;
+			return;
+		}
+		tnt_raise(ClientError, ER_NO_SUCH_FIELD, op->field_no);
+	}
 }
 
 static inline void
@@ -241,7 +362,7 @@ static void
 do_op_insert(struct tuple_update *update, struct update_op *op,
 	     const char **expr)
 {
-	op_adjust_field_no(update, op, rope_size(update->rope));
+	op_adjust_field_no(update, op, rope_size(update->rope) + 1);
 	op_set_read(op, expr);
 	struct update_field *field = (struct update_field *)
 		update->alloc(update->alloc_ctx, sizeof(*field));
@@ -253,23 +374,23 @@ static void
 do_op_set(struct tuple_update *update, struct update_op *op,
 	  const char **expr)
 {
-	if (op->field_no < rope_size(update->rope)) {
-		struct update_field *field = (struct update_field *)
-				rope_extract(update->rope, op->field_no);
-		/* Ignore the previous op, if any. */
-		field->op = op;
-		op_set_read(op, expr);
-		op->new_field_len = op->arg.set.length;
-	} else {
-		do_op_insert(update, op, expr);
-	}
+	/* intepret '=' for n +1 field as insert */
+	if (op->field_no == rope_size(update->rope))
+		return do_op_insert(update, op, expr);
+	op_adjust_field_no(update, op, rope_size(update->rope));
+	struct update_field *field = (struct update_field *)
+			rope_extract(update->rope, op->field_no);
+	/* Ignore the previous op, if any. */
+	field->op = op;
+	op_set_read(op, expr);
+	op->new_field_len = op->arg.set.length;
 }
 
 static void
 do_op_delete(struct tuple_update *update, struct update_op *op,
 	     const char **expr)
 {
-	op_adjust_field_no(update, op, rope_size(update->rope) - 1);
+	op_adjust_field_no(update, op, rope_size(update->rope));
 	uint32_t delete_count = mp_read_int(update, op, expr);
 
 	if ((uint64_t) op->field_no + delete_count > rope_size(update->rope))
@@ -284,33 +405,123 @@ do_op_delete(struct tuple_update *update, struct update_op *op,
 		rope_erase(update->rope, op->field_no);
 }
 
-static void
-do_op_arith(struct tuple_update *update, struct update_op *op,
-	    const char **expr)
+static inline struct op_arith_arg
+make_arith_operation(struct op_arith_arg arg1, struct op_arith_arg arg2,
+		     char opcode, uint32_t err_fieldno)
 {
-	op_check_field_no(update, op->field_no, rope_size(update->rope) - 1);
+	struct op_arith_arg result;
+
+	arith_type lowest_type = arg1.type;
+	if (arg1.type > arg2.type)
+		lowest_type = arg2.type;
+
+	if (lowest_type == AT_INT) {
+		result.type = AT_INT;
+		switch(opcode) {
+		case '+':
+			int96_add(&arg1.int96, &arg2.int96);
+			break;
+		case '-':
+			int96_invert(&arg2.int96);
+			int96_add(&arg1.int96, &arg2.int96);
+			break;
+		default:
+			assert(false); /* checked by update_read_ops */
+			break;
+		}
+		if (!int96_is_uint64(&arg1.int96) &&
+		    !int96_is_neg_int64(&arg1.int96)) {
+			tnt_raise(ClientError,
+				  ER_UPDATE_INTEGER_OVERFLOW,
+				  opcode, err_fieldno);
+		}
+		return arg1;
+	} else {
+		/* At least one of operands is double or float */
+		double a = cast_arith_arg_to_double(arg1);
+		double b = cast_arith_arg_to_double(arg2);
+		double c;
+		switch(opcode) {
+		case '+': c = a + b; break;
+		case '-': c = a - b; break;
+		default:
+			tnt_raise(ClientError, ER_ARG_TYPE, (char ) opcode,
+				err_fieldno, "positive integer");
+			break;
+		}
+		if (lowest_type == AT_DOUBLE) {
+			/* result is DOUBLE */
+			result.type = AT_DOUBLE;
+			result.dbl = c;
+		} else {
+			/* result is FLOAT */
+			assert(lowest_type == AT_FLOAT);
+			result.type = AT_FLOAT;
+			result.flt = (float)c;
+		}
+	}
+	return result;
+}
+
+static void
+prepare_op_arith(struct tuple_update *update, struct update_op *op,
+		 const char **expr, struct op_arith_arg *left)
+{
+	op_adjust_field_no(update, op, rope_size(update->rope));
 
 	struct update_field *field = (struct update_field *)
 			rope_extract(update->rope, op->field_no);
-
-	/* TODO: signed int & float support */
-	struct op_arith_arg *arg = &op->arg.arith;
-
-	arg->val = mp_read_int(update, op, expr);
 	if (field->op) {
 		tnt_raise(ClientError, ER_UPDATE_FIELD, update->index_base +
 			  op->field_no, "double update of the same field");
 	}
 	field->op = op;
 	const char *old = field->old;
-	uint64_t val = mp_read_int(update, op, &old);
+	*left = mp_read_arith_arg(update, op, &old);
+	op->arg.arith = mp_read_arith_arg(update, op, expr);
+}
+
+static void
+do_op_arith(struct tuple_update *update, struct update_op *op,
+	    const char **expr)
+{
+	struct op_arith_arg left;
+	prepare_op_arith(update, op, expr, &left);
+	op->arg.arith = make_arith_operation(left, op->arg.arith, op->opcode,
+					     update->index_base + op->field_no);
+	op->new_field_len = mp_sizeof_op_arith_arg(op->arg.arith);
+}
+
+static void
+do_op_bit(struct tuple_update *update, struct update_op *op,
+	  const char **expr)
+{
+	op_adjust_field_no(update, op, rope_size(update->rope));
+	struct update_field *field = (struct update_field *)
+			rope_extract(update->rope, op->field_no);
+
+	struct op_bit_arg *arg = &op->arg.bit;
+	arg->val = mp_read_uint(update, op, expr);
+	if (field->op) {
+		tnt_raise(ClientError, ER_UPDATE_FIELD,
+			update->index_base + op->field_no,
+			"double update of the same field");
+	}
+	field->op = op;
+	const char *old = field->old;
+	uint64_t val = mp_read_uint(update, op, &old);
 	switch (op->opcode) {
-	case '+': arg->val += val; break;
-	case '&': arg->val &= val; break;
-	case '^': arg->val ^= val; break;
-	case '|': arg->val |= val; break;
-	case '-': arg->val = val - arg->val; break;
-	default: assert(false); /* checked by update_read_ops */
+	case '&':
+		arg->val &= val;
+		break;
+	case '^':
+		arg->val ^= val;
+		break;
+	case '|':
+		arg->val |= val;
+		break;
+	default:
+		assert(false); /* checked by update_read_ops */
 	}
 	op->new_field_len = mp_sizeof_uint(arg->val);
 }
@@ -319,7 +530,7 @@ static void
 do_op_splice(struct tuple_update *update, struct update_op *op,
 	     const char **expr)
 {
-	op_check_field_no(update, op->field_no, rope_size(update->rope) - 1);
+	op_adjust_field_no(update, op, rope_size(update->rope));
 	struct update_field *field = (struct update_field *)
 			rope_extract(update->rope, op->field_no);
 	if (field->op) {
@@ -345,8 +556,13 @@ do_op_splice(struct tuple_update *update, struct update_op *op,
 				  op->field_no, "offset is out of bound");
 		}
 		arg->offset = arg->offset + str_len + 1;
-	} else if (arg->offset > str_len) {
-		arg->offset = str_len;
+	} else if (arg->offset - update->index_base >= 0) {
+		arg->offset -= update->index_base;
+		if (arg->offset > str_len)
+			arg->offset = str_len;
+	} else /* (offset <= 0) */ {
+		tnt_raise(ClientError, ER_SPLICE, update->index_base +
+				op->field_no, "offset is out of bound");
 	}
 
 	assert(arg->offset >= 0 && arg->offset <= str_len);
@@ -385,7 +601,26 @@ store_op_set(struct op_set_arg *arg, const char *in __attribute__((unused)),
 }
 
 static void
-store_op_arith(struct op_arith_arg *arg, const char *in __attribute__((unused)), char *out)
+store_op_arith(struct op_arith_arg *arg,
+	       const char *in __attribute__((unused)), char *out)
+{
+	if (arg->type == AT_INT) {
+		if (int96_is_uint64(&arg->int96)) {
+			mp_encode_uint(out, int96_extract_uint64(&arg->int96));
+		} else {
+			assert(int96_is_neg_int64(&arg->int96));
+			mp_encode_int(out, int96_extract_neg_int64(&arg->int96));
+		}
+	} else if (arg->type == AT_DOUBLE) {
+		mp_encode_double(out, arg->dbl);
+	} else {
+		assert(arg->type == AT_FLOAT);
+		mp_encode_float(out, arg->flt);
+	}
+}
+
+static void
+store_op_bit(struct op_bit_arg *arg, const char *in __attribute__((unused)), char *out)
 {
 	mp_encode_uint(out, arg->val);
 }
@@ -420,6 +655,8 @@ static const struct update_op_meta op_insert =
 	{ do_op_insert, (store_op_func) store_op_insert, 3 };
 static const struct update_op_meta op_arith =
 	{ do_op_arith, (store_op_func) store_op_arith, 3 };
+static const struct update_op_meta op_bit =
+	{ do_op_bit, (store_op_func) store_op_bit, 3 };
 static const struct update_op_meta op_splice =
 	{ do_op_splice, (store_op_func) store_op_splice, 5 };
 static const struct update_op_meta op_delete =
@@ -590,10 +827,12 @@ update_read_ops(struct tuple_update *update, const char *expr,
 			break;
 		case '+':
 		case '-':
+			op->meta = &op_arith;
+			break;
 		case '&':
 		case '|':
 		case '^':
-			op->meta = &op_arith;
+			op->meta = &op_bit;
 			break;
 		case ':':
 			op->meta = &op_splice;
@@ -609,7 +848,14 @@ update_read_ops(struct tuple_update *update, const char *expr,
 		}
 		if (args != op->meta->args)
 			tnt_raise(ClientError, ER_UNKNOWN_UPDATE_OP);
-		op->field_no = mp_read_int(update, op, &expr);
+		int32_t field_no = mp_read_int(update, op, &expr);
+		if (field_no - update->index_base >= 0) {
+			op->field_no = field_no - update->index_base;
+		} else if (field_no < 0) {
+			op->field_no = field_no;
+		} else {
+			tnt_raise(ClientError, ER_NO_SUCH_FIELD, field_no);
+		}
 		op->meta->do_op(update, op, &expr);
 	}
 

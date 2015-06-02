@@ -4,13 +4,13 @@ log = require 'log'
 msgpack = require 'msgpack'
 
 LISTEN = require('uri').parse(box.cfg.listen)
-space = box.schema.create_space('net_box_test_space')
+space = box.schema.space.create('net_box_test_space')
 index = space:create_index('primary', { type = 'tree' })
 
 -- low level connection
 log.info("create connection")
 cn = remote:new(LISTEN.host, LISTEN.service)
-cn:_wait_state({'active', 'error'}, 1)
+cn:_wait_state({active = true, error = true}, 1)
 log.info("state is %s", cn.state)
 
 cn:ping()
@@ -93,7 +93,8 @@ cn.space.net_box_test_space:update({123}, { { '+', 2, 1 } })
 cn.space.net_box_test_space:update(123, { { '+', 2, 1 } })
 cn.space.net_box_test_space:select{123}
 
-cn.space.net_box_test_space:update({123}, { { '=', 1, 2 } })
+cn.space.net_box_test_space:insert(cn.space.net_box_test_space:get{123}:update{ { '=', 1, 2 } })
+cn.space.net_box_test_space:delete{123}
 cn.space.net_box_test_space:select{2}
 cn.space.net_box_test_space:select({234}, { iterator = 'LT' })
 
@@ -113,6 +114,8 @@ cn.space.net_box_test_space:update(10,  {{':', 2, -2, 0, '})'}})
 cn.space.net_box_test_space:delete{10}
 
 cn.space.net_box_test_space:select({}, { iterator = 'ALL' })
+-- gh-841: net.box uses incorrect iterator type for select with no arguments
+cn.space.net_box_test_space:select()
 
 cn.space.net_box_test_space.index.primary:min()
 cn.space.net_box_test_space.index.primary:min(354)
@@ -133,12 +136,12 @@ cn:call('test_foo')
 
 -- -- 2 reconnect
 cn = remote:new(LISTEN.host, LISTEN.service, { reconnect_after = .1 })
-cn:_wait_state({'active'}, 1)
+cn:_wait_state({active = true}, 1)
 cn.space ~= nil
 
 cn.space.net_box_test_space:select({}, { iterator = 'ALL' })
 cn:_fatal 'Test error'
-cn:_wait_state({'active', 'activew'}, 2)
+cn:_wait_state({active = true, activew = true}, 2)
 cn:ping()
 cn.state
 cn.space.net_box_test_space:select({}, { iterator = 'ALL' })
@@ -215,7 +218,8 @@ cn = remote:timeout(1):new(LISTEN.host, LISTEN.service, { user = 'netbox', passw
 remote.self:ping()
 remote.self.space.net_box_test_space:select{234}
 remote.self:timeout(123).space.net_box_test_space:select{234}
-
+remote.self:is_connected()
+remote.self:wait_connected()
 
 
 -- cleanup database after tests
@@ -223,52 +227,28 @@ space:drop()
 
 
 -- admin console tests
-function console_test(...) return { ... } end
-function console_test_error(...) error(string.format(...)) end
-function console_unpack_test(...) return ... end
-
-
-ADMIN = require('uri').parse(os.getenv('ADMIN'))
-
-cn = remote:new(LISTEN.host, LISTEN.service)
-cnc = remote:new(ADMIN.host, ADMIN.service)
-cnc.console
-
-cn:call('console_test', 1, 2, 3, 'string', nil)
-cnc:call('console_test', 1, 2, 3, 'string', nil)
-
-cn:call('console_test_error', 'error %d', 123)
-cnc:call('console_test_error', 'error %d', 123)
-
-
-cn:call('console_unpack_test', 1)
-cnc:call('console_unpack_test', 1)
-
-
-
-
-cn:call('123')
-cnc:call('123')
-
--- gh-649: String escaping doesn't work in remote console
-function echo(...) return ... end
-#cn:call('echo', [[a \[\[ \091\091 b \093\093 c \n d \t e \]\] f ]])[1][1]
-#cnc:call('echo', [[a \[\[ \091\091 b \093\093 c \n d \t e \]\] f ]])[1][1]
-#cn:call('echo', "a [[ \091\091 b \093\093 c \n d \t e ]] f ")[1][1]
-#cnc:call('echo', "a [[ \091\091 b \093\093 c \n d \t e ]] f ")[1][1]
+cnc = remote:new(os.getenv('ADMIN'))
+cnc.console ~= nil
+cnc:console('return 1, 2, 3, "string", nil')
+cnc:console('error("test")')
+cnc:console('a = {1, 2, 3, 4}; return a[3]')
 
 -- #545 user or password is not defined
 remote:new(LISTEN.host, LISTEN.service, { user = 'test' })
 remote:new(LISTEN.host, LISTEN.service, { password = 'test' })
 
 -- #544 usage for remote[point]method
-cn:call('console_test')
-cn.call('console_test')
+cn = remote:new(LISTEN.host, LISTEN.service)
+
+cn:eval('return true')
+cn.eval('return true')
 
 cn.ping()
 
-remote.self:call('console_test')
-remote.self.call('console_test')
+cn:close()
+
+remote.self:eval('return true')
+remote.self.eval('return true')
 
 
 -- uri as the first argument
@@ -296,8 +276,8 @@ end;
 gh594()
 
 -- #636: Reload schema on demand
-sp = box.schema.create_space('test_old')
-sp:create_index('primary')
+sp = box.schema.space.create('test_old')
+_ = sp:create_index('primary')
 sp:insert{1, 2, 3}
 
 con = remote.new(box.cfg.listen)
@@ -305,8 +285,8 @@ con:ping()
 con.space.test_old:select{}
 con.space.test == nil
 
-sp = box.schema.create_space('test')
-sp:create_index('primary')
+sp = box.schema.space.create('test')
+_ = sp:create_index('primary')
 sp:insert{2, 3, 4}
 
 con.space.test == nil

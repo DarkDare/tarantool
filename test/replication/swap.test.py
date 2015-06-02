@@ -10,20 +10,34 @@ ID_STEP = 5
 LOGIN = 'test'
 PASSWORD = 'pass123456'
 
+engines = ['memtx', 'sophia']
+
 def insert_tuples(_server, begin, end, msg = "tuple"):
-    for i in range(begin, end):
-        _server.sql("insert into t0 values (%d, '%s %d')" % (i, msg, i))
+    for engine in engines:
+        for i in range(begin, end):
+            print 'box.space.%s:insert{%d, "%s %d"}' % (engine, i, msg, i)
+            print '-'
+            space = _server.iproto.py_con.space(engine)
+            print space.insert((i, '%s %d' % (msg, i)))
 
 def select_tuples(_server, begin, end):
-    for i in range(begin, end):
-        _server.sql("select * from t0 where k0 = %d" % i)
+    for engine in engines:
+        for i in range(begin, end):
+            print 'box.space.%s:select{%d}' % (engine, i)
+            print '-'
+            space = _server.iproto.py_con.space(engine)
+            print space.select(i)
 
 # master server
 master = server
+# Re-deploy server to cleanup Sophia data
+master.stop()
+master.cleanup()
+master.deploy()
 master.admin("box.schema.user.create('%s', { password = '%s'})" % (LOGIN, PASSWORD))
 master.admin("box.schema.user.grant('%s', 'read,write,execute', 'universe')" % LOGIN)
-master.sql.py_con.authenticate(LOGIN, PASSWORD)
-master.uri = '%s:%s@%s' % (LOGIN, PASSWORD, master.sql.uri)
+master.iproto.py_con.authenticate(LOGIN, PASSWORD)
+master.uri = '%s:%s@%s' % (LOGIN, PASSWORD, master.iproto.uri)
 os.putenv('MASTER', master.uri)
 
 # replica server
@@ -32,16 +46,17 @@ replica.script = "replication/replica.lua"
 replica.vardir = os.path.join(server.vardir, 'replica')
 replica.deploy()
 replica.admin("while box.info.server.id == 0 do require('fiber').sleep(0.01) end")
-replica.uri = '%s:%s@%s' % (LOGIN, PASSWORD, replica.sql.uri)
+replica.uri = '%s:%s@%s' % (LOGIN, PASSWORD, replica.iproto.uri)
 replica.admin("while box.space['_priv']:len() < 1 do require('fiber').sleep(0.01) end")
-replica.sql.py_con.authenticate(LOGIN, PASSWORD)
+replica.iproto.py_con.authenticate(LOGIN, PASSWORD)
 
-master.admin("s = box.schema.create_space('tweedledum', {id = 0})")
-master.admin("index = s:create_index('primary', {type = 'hash'})")
+for engine in engines:
+    master.admin("s = box.schema.space.create('%s', { engine = '%s'})" % (engine, engine))
+    master.admin("index = s:create_index('primary', {type = 'tree'})")
 
 ### gh-343: replica.cc must not add login and password to proc title
 #status = replica.get_param("status")
-#host_port = "%s:%s" % master.sql.uri
+#host_port = "%s:%s" % master.iproto.uri
 #m = re.search(r'replica/(.*)/.*', status)
 #if not m or m.group(1) != host_port:
 #    print 'invalid box.info.status', status, 'expected host:port', host_port

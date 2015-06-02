@@ -5,7 +5,7 @@ import re
 import urlparse
 
 AUTHOR = u'Tarantool'
-SITENAME = u'Tarantool - a NoSQL database in a Lua script'
+SITENAME = u'Tarantool - a NoSQL database running in a Lua application server'
 SITEURL = 'http://tarantool.org'
 
 PATH = 'content'
@@ -14,7 +14,7 @@ TIMEZONE = 'Europe/Moscow'
 
 DEFAULT_LANG = u'en'
 
-PLUGINS = ['plugins.documentation', 'plugins.beautifulsite']
+PLUGINS = ['plugins.beautifulsite']
 
 # Feed generation is usually not desired when developing
 FEED_ALL_ATOM = None
@@ -23,7 +23,6 @@ TRANSLATION_FEED_ATOM = None
 
 DEFAULT_PAGINATION = False
 
-DOCS_PATH  = ['doc']
 BSITE_PATH = ['newsite']
 ARTICLE_EXCLUDES = ['doc', 'newsite']
 
@@ -50,6 +49,7 @@ STATIC_PATHS = [
     'js/main.js',
     'js/old_tabs.js',
     'js/select.js',
+    'js/filesize.min.js'
 ]
 
 EXTRA_PATH_METADATA = {}

@@ -1,5 +1,5 @@
 fiber = require('fiber')
-space = box.schema.create_space('tweedledum')
+space = box.schema.space.create('tweedledum')
 index = space:create_index('primary', { type = 'hash' })
 -- A test case for a race condition between ev_schedule
 -- and wal_schedule fiber schedulers.
@@ -42,13 +42,13 @@ space:delete{1667655012}
 space:insert{1953719668, 'old', 1684234849}
 -- test that insert produces a duplicate key error
 space:insert{1953719668, 'old', 1684234849}
-space:update(1953719668, {{'=', 1, 1936941424}, {'=', 2, 'new'}})
+space:update(1953719668, {{'=', 1, 1953719668}, {'=', 2, 'new'}})
 space:update(1234567890, {{'+', 3, 1}})
-space:update(1936941424, {{'+', 3, 1}})
-space:update(1936941424, {{'-', 3, 1}})
-space:update(1936941424, {{'-', 3, 1}})
-space:update(1936941424, {{'+', 3, 1}})
-space:delete{1936941424}
+space:update(1953719668, {{'+', 3, 1}})
+space:update(1953719668, {{'-', 3, 1}})
+space:update(1953719668, {{'-', 3, 1}})
+space:update(1953719668, {{'+', 3, 1}})
+space:delete{1953719668}
 -- must be read-only
 
 space:insert{1953719668}
@@ -319,5 +319,11 @@ getmetatable(fiber.info())
 zombie = false
 for fid, i in pairs(fiber.info()) do if i.name == 'zombie' then zombie = true end end
 zombie
+-- test case for gh-778 - fiber.id() on a dead fiber
 
+f =  fiber.create(function() end)
+id = f:id()
+fiber.sleep(0)
+f:status() 
+id == f:id()
 fiber = nil

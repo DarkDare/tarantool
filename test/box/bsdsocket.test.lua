@@ -184,17 +184,20 @@ s:close()
 os.remove('/tmp/tarantool-test-socket')
 
 --# setopt delimiter ';'
-function aexitst(ai, host, port)
+function aexitst(ai, hostnames, port)
     for i, a in pairs(ai) do
-        if a.host == host and a.port == port then
-            return true
+        for j, host in pairs(hostnames) do
+            if a.host == host and a.port == port then
+                return true
+            end
         end
     end
-    return false
+    return ai
 end;
 
+
 aexitst( socket.getaddrinfo('localhost', 'http', {  protocol = 'tcp',
-    type = 'SOCK_STREAM'}), '127.0.0.1', 80 );
+    type = 'SOCK_STREAM'}), {'127.0.0.1', '::1'}, 80 );
 --# setopt delimiter ''
 
 #(socket.getaddrinfo('tarantool.org', 'http', {})) > 0
@@ -213,8 +216,8 @@ string.match(tostring(sc), ', peer') == nil
 require('errno').strerror(sc:getsockopt('SOL_SOCKET', 'SO_ERROR'))
 
 --# setopt delimiter ';'
-json.encode(socket.getaddrinfo('ya.ru', '80',
-    { flags = { 'AI_NUMERICSERV', 'AI_NUMERICHOST', } }))
+socket.getaddrinfo('127.0.0.1', '80', { type = 'SOCK_DGRAM',
+    flags = { 'AI_NUMERICSERV', 'AI_NUMERICHOST', } });
 --# setopt delimiter ''
 
 sc = socket('AF_INET', 'SOCK_STREAM', 'tcp')

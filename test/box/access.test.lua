@@ -21,7 +21,7 @@ session.su('test')
 -- you can't create spaces unless you have a write access on
 -- system space _space
 -- in future we may  introduce a separate privilege
-box.schema.create_space('test')
+box.schema.space.create('test')
 -- su() goes through because called from admin
 -- console, and it has no access checks
 -- for functions
@@ -107,7 +107,7 @@ c:close()
 -- Dropping a space recursively drops all grants - it's possible to 
 -- restore from a snapshot
 box.schema.user.create('testus')
-s = box.schema.create_space('admin_space')
+s = box.schema.space.create('admin_space')
 index = s:create_index('primary', {type = 'hash', parts = {1, 'NUM'}})
 box.schema.user.grant('testus', 'write', 'space', 'admin_space')
 s:drop()
@@ -123,7 +123,7 @@ session = box.session
 box.schema.user.create('uniuser')
 box.schema.user.grant('uniuser', 'read, write, execute', 'universe')
 session.su('uniuser')
-us = box.schema.create_space('uniuser_space')
+us = box.schema.space.create('uniuser_space')
 session.su('admin')
 box.schema.user.drop('uniuser')
 -- ------------------------------------------------------------
@@ -211,7 +211,7 @@ session = nil
 box.schema.user.create('twostep')
 box.schema.user.grant('twostep', 'read,write,execute', 'universe')
 box.session.su('twostep')
-twostep = box.schema.create_space('twostep')
+twostep = box.schema.space.create('twostep')
 index2 = twostep:create_index('primary')
 box.schema.func.create('test')
 box.session.su('admin')
@@ -250,3 +250,16 @@ box.schema.user.grant('guest', 'read,write,execute', 'universe', '', { if_not_ex
 box.schema.user.revoke('guest', 'read,write,execute', 'universe')
 box.schema.user.revoke('guest', 'read,write,execute', 'universe')
 box.schema.user.revoke('guest', 'read,write,execute', 'universe', '', { if_exists = true })
+box.schema.func.create('dummy', { if_not_exists = true })
+box.schema.func.create('dummy', { if_not_exists = true })
+box.schema.func.drop('dummy')
+
+-- gh-664 roles: accepting bad syntax for create
+box.schema.user.create('user', 'blah')
+box.schema.user.drop('user', 'blah')
+
+-- gh-664 roles: accepting bad syntax for create
+box.schema.func.create('func', 'blah')
+box.schema.func.drop('blah', 'blah')
+-- gh-758 attempt to set password for user guest
+box.schema.user.passwd('guest', 'sesame')

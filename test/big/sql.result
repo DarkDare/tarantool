@@ -1,10 +1,14 @@
+net_box = require('net.box')
+---
+...
+-- Prepare spaces
 box.schema.user.create('test', { password = 'test' })
 ---
 ...
 box.schema.user.grant('test', 'execute,read,write', 'universe')
 ---
 ...
-s = box.schema.create_space('tweedledum', { id = 0 })
+s = box.schema.space.create('tweedledum', { id = 0 })
 ---
 ...
 index1 = s:create_index('primary', { type = 'tree', parts = { 1, 'str'} })
@@ -13,87 +17,91 @@ index1 = s:create_index('primary', { type = 'tree', parts = { 1, 'str'} })
 index2 = s:create_index('secondary', { type = 'tree', unique = false, parts = {2, 'str'}})
 ---
 ...
-#
-# A test case for Bug#729758
-# "SELECT fails with a disjunct and small LIMIT"
-# https://bugs.launchpad.net/tarantool/+bug/729758
-#
-insert into t0 values ('Doe', 'Richard')
+function compare(a,b) return a[1] < b[1] end
+---
+...
+conn = net_box:new('test:test@' .. box.cfg.listen)
+---
+...
+space = conn.space.tweedledum
+---
+...
+-- A test case for Bug#729758
+-- "SELECT fails with a disjunct and small LIMIT"
+-- https://bugs.launchpad.net/tarantool/+bug/729758
+space:insert{'Doe', 'Richard'}
 ---
 - ['Doe', 'Richard']
 ...
-insert into t0 values ('Roe', 'Richard')
+space:insert{'Roe', 'Richard'}
 ---
 - ['Roe', 'Richard']
 ...
-insert into t0 values ('Woe', 'Richard')
+space:insert{'Woe', 'Richard'}
 ---
 - ['Woe', 'Richard']
 ...
-insert into t0 values ('Major', 'Tomas')
+space:insert{'Major', 'Tomas'}
 ---
 - ['Major', 'Tomas']
 ...
-insert into t0 values ('Kytes', 'Tomas')
+space:insert{'Kytes', 'Tomas'}
 ---
 - ['Kytes', 'Tomas']
 ...
-select * from t0 where k1='Richard' limit 2
+sorted(space.index.secondary:select('Richard'))
 ---
-- ['Doe', 'Richard']
-- ['Roe', 'Richard']
+- - ['Doe', 'Richard']
+  - ['Roe', 'Richard']
+  - ['Woe', 'Richard']
 ...
-#
-# A test case for Bug#729879
-# "Zero limit is treated the same as no limit"
-# https://bugs.launchpad.net/tarantool/+bug/729879
-#
-select * from t0 where k1='Richard' limit 0
+-- A test case for Bug#729879
+-- "Zero limit is treated the same as no limit"
+-- https://bugs.launchpad.net/tarantool/+bug/729879
+sorted(space.index.secondary:select('Richard', { limit = 0 }))
 ---
+- []
 ...
 s:truncate()
 ---
 ...
-#
-# A test case for Bug#730593
-# "Bad data if incomplete tuple"
-# https://bugs.launchpad.net/tarantool/+bug/730593
-# Verify that if there is an index on, say, field 2,
-# we can't insert tuples with cardinality 1 and
-# get away with it.
-#
-insert into t0 values ('Britney')
+-- A test case for Bug#730593
+-- "Bad data if incomplete tuple"
+-- https://bugs.launchpad.net/tarantool/+bug/730593
+-- Verify that if there is an index on, say, field 2,
+-- we can't insert tuples with cardinality 1 and
+-- get away with it.
+space:insert{'Britney'}
 ---
-- error:
-    errcode: ER_INDEX_ARITY
-    errmsg: Tuple field count 1 is less than required by a defined index (expected 2)
+- error: Tuple field count 1 is less than required by a defined index (expected 2)
 ...
-select * from t0 where k1='Anything'
+sorted(space.index.secondary:select('Anything'))
 ---
+- []
 ...
-insert into t0 values ('Stephanie')
+space:insert{'Stephanie'}
 ---
-- error:
-    errcode: ER_INDEX_ARITY
-    errmsg: Tuple field count 1 is less than required by a defined index (expected 2)
+- error: Tuple field count 1 is less than required by a defined index (expected 2)
 ...
-select * from t0 where k1='Anything'
+sorted(space.index.secondary:select('Anything'))
 ---
+- []
 ...
-insert into t0 values ('Spears', 'Britney')
+space:insert{'Spears', 'Britney'}
 ---
 - ['Spears', 'Britney']
 ...
-select * from t0 where k0='Spears'
+space:select{'Spears'}
 ---
-- ['Spears', 'Britney']
+- - ['Spears', 'Britney']
 ...
-select * from t0 where k1='Anything'
+sorted(space.index.secondary:select('Anything'))
 ---
+- []
 ...
-select * from t0 where k1='Britney'
+sorted(space.index.secondary:select('Britney'))
 ---
-- ['Spears', 'Britney']
+- - ['Spears', 'Britney']
 ...
 s.index[0]:select('Spears', { limit = 100, iterator = 'GE' })
 ---
@@ -103,32 +111,33 @@ s.index[1]:select('Britney', { limit = 100, iterator = 'GE' })
 ---
 - - ['Spears', 'Britney']
 ...
-delete from t0 where k0='Spears'
+space:delete('Spears')
 ---
 - ['Spears', 'Britney']
 ...
+-- Cleanup
 s:truncate()
 ---
 ...
-#
-# Test composite keys with trees
-#
+-- Test composite keys with trees
+-- Redefine the second key to be composite
 s.index.secondary:alter{unique = true, parts = { 2, 'str', 3, 'str'}}
 ---
 ...
-insert into t0 values ('key1', 'part1', 'part2')
+space:insert{'key1', 'part1', 'part2'}
 ---
 - ['key1', 'part1', 'part2']
 ...
-replace into t0 values ('key1', 'part1', 'part2')
+-- Test a duplicate insert on unique index that once resulted in a crash (bug 926080)
+space:replace{'key1', 'part1', 'part2'}
 ---
 - ['key1', 'part1', 'part2']
 ...
-insert into t0 values ('key2', 'part1', 'part2_a')
+space:insert{'key2', 'part1', 'part2_a'}
 ---
 - ['key2', 'part1', 'part2_a']
 ...
-insert into t0 values ('key3', 'part1', 'part2_b')
+space:insert{'key3', 'part1', 'part2_b'}
 ---
 - ['key3', 'part1', 'part2_b']
 ...
@@ -138,23 +147,23 @@ s.index[1]:select{}
   - ['key2', 'part1', 'part2_a']
   - ['key3', 'part1', 'part2_b']
 ...
-select * from t0 where k0='key1'
+space:select{'key1'}
 ---
-- ['key1', 'part1', 'part2']
+- - ['key1', 'part1', 'part2']
 ...
-select * from t0 where k0='key2'
+space:select{'key2'}
 ---
-- ['key2', 'part1', 'part2_a']
+- - ['key2', 'part1', 'part2_a']
 ...
-select * from t0 where k0='key3'
+space:select{'key3'}
 ---
-- ['key3', 'part1', 'part2_b']
+- - ['key3', 'part1', 'part2_b']
 ...
-select * from t0 where k1='part1'
+sorted(space.index.secondary:select('part1'))
 ---
-- ['key1', 'part1', 'part2']
-- ['key2', 'part1', 'part2_a']
-- ['key3', 'part1', 'part2_b']
+- - ['key1', 'part1', 'part2']
+  - ['key2', 'part1', 'part2_a']
+  - ['key3', 'part1', 'part2_b']
 ...
 s.index[1]:select('part1', { limit = 100, iterator = 'GE' })
 ---
@@ -167,67 +176,67 @@ s.index[0]:select('key2', { limit = 100, iterator = 'GE' })
 - - ['key2', 'part1', 'part2_a']
   - ['key3', 'part1', 'part2_b']
 ...
-s.index[1]:select({ 'part1', 'part2_a' }, { limit = 100, iterator = 'GE' })
+s.index[1]:select({ 'part1', 'part2_a' }, { limit = 1, iterator = 'GE' })
 ---
 - - ['key2', 'part1', 'part2_a']
+...
+space:select{'key1'}
+---
+- - ['key1', 'part1', 'part2']
+...
+space:select{'key2'}
+---
+- - ['key2', 'part1', 'part2_a']
+...
+space:select{'key3'}
+---
+- - ['key3', 'part1', 'part2_b']
+...
+sorted(space.index.secondary:select('part1'))
+---
+- - ['key1', 'part1', 'part2']
+  - ['key2', 'part1', 'part2_a']
   - ['key3', 'part1', 'part2_b']
 ...
-select * from t0 where k0='key1'
+space:delete('key1')
 ---
 - ['key1', 'part1', 'part2']
 ...
-select * from t0 where k0='key2'
+space:delete('key2')
 ---
 - ['key2', 'part1', 'part2_a']
 ...
-select * from t0 where k0='key3'
----
-- ['key3', 'part1', 'part2_b']
-...
-select * from t0 where k1='part1'
----
-- ['key1', 'part1', 'part2']
-- ['key2', 'part1', 'part2_a']
-- ['key3', 'part1', 'part2_b']
-...
-delete from t0 where k0='key1'
----
-- ['key1', 'part1', 'part2']
-...
-delete from t0 where k0='key2'
----
-- ['key2', 'part1', 'part2_a']
-...
-delete from t0 where k0='key3'
+space:delete('key3')
 ---
 - ['key3', 'part1', 'part2_b']
 ...
 s:truncate()
 ---
 ...
+-- check non-unique multipart keys
 s.index.primary:alter{type = 'tree', parts = { 1, 'num'}}
 ---
 ...
 s.index.secondary:alter{unique = false}
 ---
 ...
-insert into t0 values (01234567, 'part1', 'part2')
+space:insert{1234567, 'part1', 'part2'}
 ---
 - [1234567, 'part1', 'part2']
 ...
-insert into t0 values (11234567, 'part1', 'part2')
+space:insert{11234567, 'part1', 'part2'}
 ---
 - [11234567, 'part1', 'part2']
 ...
-insert into t0 values (21234567, 'part1', 'part2_a')
+space:insert{21234567, 'part1', 'part2_a'}
 ---
 - [21234567, 'part1', 'part2_a']
 ...
-insert into t0 values (31234567, 'part1_a', 'part2')
+space:insert{31234567, 'part1_a', 'part2'}
 ---
 - [31234567, 'part1_a', 'part2']
 ...
-insert into t0 values (41234567, 'part1_a', 'part2_a')
+space:insert{41234567, 'part1_a', 'part2_a'}
 ---
 - [41234567, 'part1_a', 'part2_a']
 ...
@@ -237,7 +246,7 @@ l = {}
 for state, v in s:pairs() do table.insert(l, v) end
 ---
 ...
-return l
+l
 ---
 - - [1234567, 'part1', 'part2']
   - [11234567, 'part1', 'part2']
@@ -245,63 +254,66 @@ return l
   - [31234567, 'part1_a', 'part2']
   - [41234567, 'part1_a', 'part2_a']
 ...
-select * from t0 where k0=01234567
+space:select{1234567}
 ---
-- [1234567, 'part1', 'part2']
+- - [1234567, 'part1', 'part2']
 ...
-select * from t0 where k0=11234567
+space:select{11234567}
 ---
-- [11234567, 'part1', 'part2']
+- - [11234567, 'part1', 'part2']
 ...
-select * from t0 where k0=21234567
+space:select{21234567}
 ---
-- [21234567, 'part1', 'part2_a']
+- - [21234567, 'part1', 'part2_a']
 ...
-select * from t0 where k1='part1'
+sorted(space.index.secondary:select('part1'))
 ---
-- [1234567, 'part1', 'part2']
-- [11234567, 'part1', 'part2']
-- [21234567, 'part1', 'part2_a']
+- - [1234567, 'part1', 'part2']
+  - [11234567, 'part1', 'part2']
+  - [21234567, 'part1', 'part2_a']
 ...
-select * from t0 where k1='part1_a'
+sorted(space.index.secondary:select('part1_a'))
 ---
-- [31234567, 'part1_a', 'part2']
-- [41234567, 'part1_a', 'part2_a']
+- - [31234567, 'part1_a', 'part2']
+  - [41234567, 'part1_a', 'part2_a']
 ...
-select * from t0 where k1='part_none'
+sorted(space.index.secondary:select('part_none'))
 ---
+- []
 ...
-box.space[0].index[1]:select({'part1', 'part2'})
+sorted(box.space[0].index[1]:select({'part1', 'part2'}))
 ---
 - - [1234567, 'part1', 'part2']
   - [11234567, 'part1', 'part2']
 ...
-select * from t0 where k1='part1'
+sorted(space.index.secondary:select('part1'))
+---
+- - [1234567, 'part1', 'part2']
+  - [11234567, 'part1', 'part2']
+  - [21234567, 'part1', 'part2_a']
+...
+sorted(space.index.secondary:select('part2'))
+---
+- []
+...
+-- cleanup
+space:delete(1234567)
 ---
 - [1234567, 'part1', 'part2']
-- [11234567, 'part1', 'part2']
-- [21234567, 'part1', 'part2_a']
 ...
-select * from t0 where k1='part2'
----
-...
-delete from t0 where k0=01234567
----
-- [1234567, 'part1', 'part2']
-...
-delete from t0 where k0=11234567
+space:delete(11234567)
 ---
 - [11234567, 'part1', 'part2']
 ...
-delete from t0 where k0=21234567
+space:delete(21234567)
 ---
 - [21234567, 'part1', 'part2_a']
 ...
-delete from t0 where k0=31234567
+space:delete(31234567)
 ---
 - [31234567, 'part1_a', 'part2']
 ...
-delete from t0 where k0=41234567
+space:delete(41234567)
 ---
 - [41234567, 'part1_a', 'part2_a']
 ...
@@ -318,241 +330,251 @@ s.index.primary:alter{type = 'hash'}
 s.index.secondary:alter{type = 'hash', unique = true, parts = { 2, 'str' }}
 ---
 ...
-insert into t0 values (1, 'hello')
+space:insert{1, 'hello'}
 ---
 - [1, 'hello']
 ...
-insert into t0 values (2, 'brave')
+space:insert{2, 'brave'}
 ---
 - [2, 'brave']
 ...
-insert into t0 values (3, 'new')
+space:insert{3, 'new'}
 ---
 - [3, 'new']
 ...
-insert into t0 values (4, 'world')
+space:insert{4, 'world'}
 ---
 - [4, 'world']
+...
+-- Check how build_indexes() works
+--# stop server default
+--# start server default
+net_box = require('net.box')
+---
+...
+conn = net_box:new('test:test@' .. box.cfg.listen)
+---
+...
+space = conn.space.tweedledum
+---
 ...
 s = box.space[0]
 ---
 ...
-#
-# Bug#929654 - secondary hash index is not built with build_indexes()
-#
-select * from t0 where k1='hello'
+-- Bug#929654 - secondary hash index is not built with build_indexes()
+sorted(space.index.secondary:select('hello'))
 ---
-- [1, 'hello']
+- - [1, 'hello']
 ...
-select * from t0 where k1='brave'
+sorted(space.index.secondary:select('brave'))
 ---
-- [2, 'brave']
+- - [2, 'brave']
 ...
-select * from t0 where k1='new'
+sorted(space.index.secondary:select('new'))
 ---
-- [3, 'new']
+- - [3, 'new']
 ...
-select * from t0 where k1='world'
+sorted(space.index.secondary:select('world'))
 ---
-- [4, 'world']
+- - [4, 'world']
 ...
 s:truncate()
 ---
 ...
-
-#
-# A test case for: http://bugs.launchpad.net/bugs/735140
-# Partial REPLACE corrupts index.
-#
-
+-- A test case for: http://bugs.launchpad.net/bugs/735140
+-- Partial REPLACE corrupts index.
+-- clean data and restart with appropriate config
 s.index.primary:alter{parts = {1, 'str'}}
 ---
 ...
 s.index.secondary:alter{type = 'tree', unique = false}
 ---
 ...
-insert into t0 values ('Spears', 'Britney')
+space:insert{'Spears', 'Britney'}
 ---
 - ['Spears', 'Britney']
 ...
-select * from t0 where k0='Spears'
+space:select{'Spears'}
+---
+- - ['Spears', 'Britney']
+...
+sorted(space.index.secondary:select('Britney'))
+---
+- - ['Spears', 'Britney']
+...
+-- try to insert the incoplete tuple
+space:replace{'Spears'}
+---
+- error: Tuple field count 1 is less than required by a defined index (expected 2)
+...
+-- check that nothing has been updated
+space:select{'Spears'}
+---
+- - ['Spears', 'Britney']
+...
+-- cleanup
+space:delete('Spears')
 ---
 - ['Spears', 'Britney']
 ...
-select * from t0 where k1='Britney'
----
-- ['Spears', 'Britney']
-...
-replace into t0 values ('Spears')
----
-- error:
-    errcode: ER_INDEX_ARITY
-    errmsg: Tuple field count 1 is less than required by a defined index (expected 2)
-...
-select * from t0 where k0='Spears'
----
-- ['Spears', 'Britney']
-...
-delete from t0 where k0='Spears'
----
-- ['Spears', 'Britney']
-...
+-- Test retrieval of duplicates via a secondary key
 s.index.primary:alter{parts = { 1, 'num'}}
 ---
 ...
-insert into t0 values (1, 'duplicate one')
+space:insert{1, 'duplicate one'}
 ---
 - [1, 'duplicate one']
 ...
-insert into t0 values (2, 'duplicate one')
+space:insert{2, 'duplicate one'}
 ---
 - [2, 'duplicate one']
 ...
-insert into t0 values (3, 'duplicate one')
+space:insert{3, 'duplicate one'}
 ---
 - [3, 'duplicate one']
 ...
-insert into t0 values (4, 'duplicate one')
+space:insert{4, 'duplicate one'}
 ---
 - [4, 'duplicate one']
 ...
-insert into t0 values (5, 'duplicate one')
+space:insert{5, 'duplicate one'}
 ---
 - [5, 'duplicate one']
 ...
-insert into t0 values (6, 'duplicate two')
+space:insert{6, 'duplicate two'}
 ---
 - [6, 'duplicate two']
 ...
-insert into t0 values (7, 'duplicate two')
+space:insert{7, 'duplicate two'}
 ---
 - [7, 'duplicate two']
 ...
-insert into t0 values (8, 'duplicate two')
+space:insert{8, 'duplicate two'}
 ---
 - [8, 'duplicate two']
 ...
-insert into t0 values (9, 'duplicate two')
+space:insert{9, 'duplicate two'}
 ---
 - [9, 'duplicate two']
 ...
-insert into t0 values (10, 'duplicate two')
+space:insert{10, 'duplicate two'}
 ---
 - [10, 'duplicate two']
 ...
-insert into t0 values (11, 'duplicate three')
+space:insert{11, 'duplicate three'}
 ---
 - [11, 'duplicate three']
 ...
-insert into t0 values (12, 'duplicate three')
+space:insert{12, 'duplicate three'}
 ---
 - [12, 'duplicate three']
 ...
-insert into t0 values (13, 'duplicate three')
+space:insert{13, 'duplicate three'}
 ---
 - [13, 'duplicate three']
 ...
-insert into t0 values (14, 'duplicate three')
+space:insert{14, 'duplicate three'}
 ---
 - [14, 'duplicate three']
 ...
-insert into t0 values (15, 'duplicate three')
+space:insert{15, 'duplicate three'}
 ---
 - [15, 'duplicate three']
 ...
-select * from t0 where k1='duplicate one'
+sorted(space.index.secondary:select('duplicate one'))
+---
+- - [1, 'duplicate one']
+  - [2, 'duplicate one']
+  - [3, 'duplicate one']
+  - [4, 'duplicate one']
+  - [5, 'duplicate one']
+...
+sorted(space.index.secondary:select('duplicate two'))
+---
+- - [6, 'duplicate two']
+  - [7, 'duplicate two']
+  - [8, 'duplicate two']
+  - [9, 'duplicate two']
+  - [10, 'duplicate two']
+...
+sorted(space.index.secondary:select('duplicate three'))
+---
+- - [11, 'duplicate three']
+  - [12, 'duplicate three']
+  - [13, 'duplicate three']
+  - [14, 'duplicate three']
+  - [15, 'duplicate three']
+...
+space:delete(1)
 ---
 - [1, 'duplicate one']
-- [2, 'duplicate one']
-- [3, 'duplicate one']
-- [4, 'duplicate one']
-- [5, 'duplicate one']
 ...
-select * from t0 where k1='duplicate two'
----
-- [6, 'duplicate two']
-- [7, 'duplicate two']
-- [8, 'duplicate two']
-- [9, 'duplicate two']
-- [10, 'duplicate two']
-...
-select * from t0 where k1='duplicate three'
----
-- [11, 'duplicate three']
-- [12, 'duplicate three']
-- [13, 'duplicate three']
-- [14, 'duplicate three']
-- [15, 'duplicate three']
-...
-delete from t0 where k0=1
----
-- [1, 'duplicate one']
-...
-delete from t0 where k0=2
+space:delete(2)
 ---
 - [2, 'duplicate one']
 ...
-delete from t0 where k0=3
+space:delete(3)
 ---
 - [3, 'duplicate one']
 ...
-delete from t0 where k0=4
+space:delete(4)
 ---
 - [4, 'duplicate one']
 ...
-delete from t0 where k0=5
+space:delete(5)
 ---
 - [5, 'duplicate one']
 ...
-delete from t0 where k0=6
+space:delete(6)
 ---
 - [6, 'duplicate two']
 ...
-delete from t0 where k0=7
+space:delete(7)
 ---
 - [7, 'duplicate two']
 ...
-delete from t0 where k0=8
+space:delete(8)
 ---
 - [8, 'duplicate two']
 ...
-delete from t0 where k0=9
+space:delete(9)
 ---
 - [9, 'duplicate two']
 ...
-delete from t0 where k0=10
+space:delete(10)
 ---
 - [10, 'duplicate two']
 ...
-delete from t0 where k0=11
+space:delete(11)
 ---
 - [11, 'duplicate three']
 ...
-delete from t0 where k0=12
+space:delete(12)
 ---
 - [12, 'duplicate three']
 ...
-delete from t0 where k0=13
+space:delete(13)
 ---
 - [13, 'duplicate three']
 ...
-delete from t0 where k0=14
+space:delete(14)
 ---
 - [14, 'duplicate three']
 ...
-delete from t0 where k0=15
+space:delete(15)
 ---
 - [15, 'duplicate three']
 ...
-insert into t0 values(1, 'Aardvark ')
+-- Check min() and max() functions
+space:insert{1, 'Aardvark '}
 ---
 - [1, 'Aardvark ']
 ...
-insert into t0 values(2, 'Bilimbi')
+space:insert{2, 'Bilimbi'}
 ---
 - [2, 'Bilimbi']
 ...
-insert into t0 values(3, 'Creature ')
+space:insert{3, 'Creature '}
 ---
 - [3, 'Creature ']
 ...
@@ -578,15 +600,15 @@ s.index[1]:max()
 ---
 - [3, 'Creature ']
 ...
-delete from t0 where k0=1
+space:delete(1)
 ---
 - [1, 'Aardvark ']
 ...
-delete from t0 where k0=2
+space:delete(2)
 ---
 - [2, 'Bilimbi']
 ...
-delete from t0 where k0=3
+space:delete(3)
 ---
 - [3, 'Creature ']
 ...

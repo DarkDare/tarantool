@@ -1,8 +1,8 @@
 --# stop server default
 --# start server default
 
-space = box.schema.create_space('tweedledum', { id = 0 })
-index = space:create_index('primary', { type = 'hash' })
+space = box.schema.space.create('tweedledum')
+index = space:create_index('primary')
 
 --# push filter 'listen: .*' to 'listen: <uri>'
 help()
@@ -19,7 +19,7 @@ end;
 
 function test_box_info()
     local tmp = box.info()
-    local num = {'pid', 'snapshot_pid', 'uptime'}
+    local num = {'pid', 'uptime'}
     local str = {'version', 'status' }
     local failed = {}
     if check_type(tmp.server, 'table') == false then

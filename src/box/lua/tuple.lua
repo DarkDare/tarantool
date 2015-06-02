@@ -16,8 +16,6 @@ struct tuple
     char data[0];
 } __attribute__((packed));
 
-int
-tuple_ref_nothrow(struct tuple *tuple);
 void
 tuple_unref(struct tuple *tuple);
 uint32_t
@@ -56,13 +54,8 @@ local tuple_gc = function(tuple)
 end
 
 local tuple_bless = function(tuple)
-    -- tuple_ref(..) may throw to prevent reference counter to overflow,
-    -- which is not allowed in ffi call, so we'll use nothrow version
-    if (builtin.tuple_ref_nothrow(tuple) ~= 0) then
-        box.error();
-    end
-    local tuple2 = ffi.gc(ffi.cast(const_struct_tuple_ref_t, tuple), tuple_gc)
-    return tuple2
+    -- must never fail:
+    return ffi.gc(ffi.cast(const_struct_tuple_ref_t, tuple), tuple_gc)
 end
 
 local tuple_iterator_t = ffi.typeof('struct tuple_iterator')
@@ -109,28 +102,38 @@ local function tuple_ipairs(tuple, pos)
     return fun.wrap(it, tuple, pos)
 end
 
--- a precreated metatable for totable()
-local tuple_totable_mt = {
-    __serialize = 'seq'; -- enables flow mode for yaml
-}
-
-local function tuple_totable(tuple)
+local function tuple_totable(tuple, i, j)
     -- use a precreated iterator for tuple_next
     builtin.tuple_rewind(next_it, tuple)
-    local ret = {}
-    while true do
-        local field = builtin.tuple_next(next_it)
-        if field == nil then
-            break
+    local field
+    if i ~= nil then
+        if i < 1 then
+            error('tuple.totable: invalid second argument')
         end
+        field = builtin.tuple_seek(next_it, i - 1)
+    else
+        i = 1
+        field = builtin.tuple_next(next_it)
+    end
+    if j ~= nil then
+        if j <= 0 then
+            error('tuple.totable: invalid third argument')
+        end
+    else
+        j = 4294967295
+    end
+    local ret = {}
+    while field ~= nil and i <= j do
         local val = msgpackffi.decode_unchecked(field)
         table.insert(ret, val)
+        i = i + 1
+        field = builtin.tuple_next(next_it)
     end
-    return setmetatable(ret, tuple_totable_mt)
+    return setmetatable(ret, msgpackffi.array_mt)
 end
 
-local function tuple_unpack(tuple)
-    return unpack(tuple_totable(tuple))
+local function tuple_unpack(tuple, i, j)
+    return unpack(tuple_totable(tuple, i, j))
 end
 
 local function tuple_find(tuple, offset, val)
@@ -156,7 +159,6 @@ local function tuple_update(tuple, expr)
     if type(expr) ~= 'table' then
         error("Usage: tuple:update({ { op, field, arg}+ })")
     end
-    expr = internal.normalize_update_ops(expr)
     local pexpr, pexpr_end = msgpackffi.encode_tuple(expr)
     local tuple = builtin.boxffi_tuple_update(tuple, pexpr, pexpr_end)
     if tuple == NULL then

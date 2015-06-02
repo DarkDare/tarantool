@@ -33,6 +33,12 @@
 
 enum { FORMAT_ID_MAX = UINT16_MAX - 1, FORMAT_ID_NIL = UINT16_MAX };
 enum { FORMAT_REF_MAX = INT32_MAX, TUPLE_REF_MAX = UINT16_MAX };
+/*
+ * We don't pass INDEX_OFFSET around dynamically all the time,
+ * at least hard code it so that in most cases it's a nice error
+ * message
+ */
+enum { INDEX_OFFSET = 1 };
 
 /** Common quota for tuples and indexes */
 extern struct quota memtx_quota;
@@ -209,23 +215,6 @@ tuple_ref(struct tuple *tuple)
 }
 
 /**
- * Increment tuple reference counter.
- * Returns -1 if overflow detected, 0 otherwise
- *
- * @pre tuple->refs + count >= 0
- */
-extern "C" inline int
-tuple_ref_nothrow(struct tuple *tuple)
-{
-	try {
-		tuple_ref(tuple);
-	} catch (Exception *e) {
-		return -1;
-	}
-	return 0;
-}
-
-/**
  * Decrement tuple reference counter. If it has reached zero, free the tuple.
  *
  * @pre tuple->refs + count >= 0
@@ -340,11 +329,13 @@ tuple_field_u32(struct tuple *tuple, uint32_t i)
 	if (field == NULL)
 		tnt_raise(ClientError, ER_NO_SUCH_FIELD, i);
 	if (mp_typeof(*field) != MP_UINT)
-		tnt_raise(ClientError, ER_FIELD_TYPE, i, field_type_strs[NUM]);
+		tnt_raise(ClientError, ER_FIELD_TYPE, i + INDEX_OFFSET,
+			  field_type_strs[NUM]);
 
 	uint64_t val = mp_decode_uint(&field);
 	if (val > UINT32_MAX)
-		tnt_raise(ClientError, ER_FIELD_TYPE, i, field_type_strs[NUM]);
+		tnt_raise(ClientError, ER_FIELD_TYPE, i + INDEX_OFFSET,
+			  field_type_strs[NUM]);
 	return (uint32_t) val;
 }
 
@@ -444,12 +435,12 @@ tuple_next_u32(struct tuple_iterator *it)
 	if (field == NULL)
 		tnt_raise(ClientError, ER_NO_SUCH_FIELD, it->fieldno);
 	if (mp_typeof(*field) != MP_UINT)
-		tnt_raise(ClientError, ER_FIELD_TYPE, fieldno,
+		tnt_raise(ClientError, ER_FIELD_TYPE, fieldno + INDEX_OFFSET,
 			  field_type_strs[NUM]);
 
 	uint32_t val = mp_decode_uint(&field);
 	if (val > UINT32_MAX)
-		tnt_raise(ClientError, ER_FIELD_TYPE, fieldno,
+		tnt_raise(ClientError, ER_FIELD_TYPE, fieldno + INDEX_OFFSET,
 			  field_type_strs[NUM]);
 	return (uint32_t) val;
 }

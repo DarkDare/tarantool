@@ -35,6 +35,8 @@
 #include "third_party/base64.h"
 #include "iproto_constants.h"
 
+enum { HEADER_LEN_MAX = 40, BODY_LEN_MAX = 128 };
+
 void
 xrow_header_decode(struct xrow_header *header, const char **pos,
 		   const char *end)
@@ -92,10 +94,10 @@ error:
 void
 xrow_decode_uuid(const char **pos, struct tt_uuid *out)
 {
-	if (mp_typeof(**pos) != MP_STR)
+	if (mp_typeof(**pos) != MP_STR) {
 error:
-		tnt_raise(ClientError, ER_INVALID_MSGPACK,
-			  "UUID");
+		tnt_raise(ClientError, ER_INVALID_MSGPACK, "UUID");
+	}
 	uint32_t len = mp_decode_strl(pos);
 	if (tt_uuid_from_strl(*pos, len, out) != 0)
 		goto error;
@@ -105,8 +107,6 @@ error:
 int
 xrow_header_encode(const struct xrow_header *header, struct iovec *out)
 {
-	enum { HEADER_LEN_MAX = 40 };
-
 	/* allocate memory for sign + header */
 	char *data = (char *) region_alloc(&fiber()->gc, HEADER_LEN_MAX);
 
@@ -189,8 +189,7 @@ xrow_encode_auth(struct xrow_header *packet, const char *greeting,
 	assert(login != NULL);
 	memset(packet, 0, sizeof(*packet));
 
-	enum { PACKET_LEN_MAX = 128 };
-	size_t buf_size = PACKET_LEN_MAX + login_len + SCRAMBLE_SIZE;
+	size_t buf_size = BODY_LEN_MAX + login_len + SCRAMBLE_SIZE;
 	char *buf = (char *) region_alloc(&fiber()->gc, buf_size);
 
 	char *d = buf;
@@ -265,7 +264,7 @@ xrow_encode_subscribe(struct xrow_header *row,
 {
 	memset(row, 0, sizeof(*row));
 	uint32_t cluster_size = vclock_size(vclock);
-	size_t size = 128 + cluster_size *
+	size_t size = BODY_LEN_MAX + cluster_size *
 		(mp_sizeof_uint(UINT32_MAX) + mp_sizeof_uint(UINT64_MAX));
 	char *buf = (char *) region_alloc(&fiber()->gc, size);
 	char *data = buf;
@@ -276,7 +275,9 @@ xrow_encode_subscribe(struct xrow_header *row,
 	data = xrow_encode_uuid(data, server_uuid);
 	data = mp_encode_uint(data, IPROTO_VCLOCK);
 	data = mp_encode_map(data, cluster_size);
-	vclock_foreach(vclock, server) {
+	struct vclock_iterator it;
+	vclock_iterator_init(&it, vclock);
+	vclock_foreach(&it, server) {
 		data = mp_encode_uint(data, server.id);
 		data = mp_encode_uint(data, server.lsn);
 	}
@@ -289,7 +290,7 @@ xrow_encode_subscribe(struct xrow_header *row,
 
 void
 xrow_decode_subscribe(struct xrow_header *row, struct tt_uuid *cluster_uuid,
-			struct tt_uuid *server_uuid, struct vclock *vclock)
+		      struct tt_uuid *server_uuid, struct vclock *vclock)
 {
 	if (row->bodycnt == 0)
 		tnt_raise(ClientError, ER_INVALID_MSGPACK, "request body");
@@ -351,7 +352,9 @@ xrow_decode_subscribe(struct xrow_header *row, struct tt_uuid *cluster_uuid,
 		if (mp_typeof(*d) != MP_UINT)
 			goto map_error;
 		int64_t lsn = (int64_t) mp_decode_uint(&d);
-		vclock_follow(vclock, id, lsn);
+		vclock_add_server(vclock, id);
+		if (lsn > 0)
+			vclock_follow(vclock, id, lsn);
 	}
 }
 
@@ -389,7 +392,9 @@ xrow_encode_vclock(struct xrow_header *row, const struct vclock *vclock)
 	data = mp_encode_map(data, 1);
 	data = mp_encode_uint(data, IPROTO_VCLOCK);
 	data = mp_encode_map(data, cluster_size);
-	vclock_foreach(vclock, server) {
+	struct vclock_iterator it;
+	vclock_iterator_init(&it, vclock);
+	vclock_foreach(&it, server) {
 		data = mp_encode_uint(data, server.id);
 		data = mp_encode_uint(data, server.lsn);
 	}

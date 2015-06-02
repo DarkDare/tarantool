@@ -46,6 +46,7 @@ src/box/bootstrap.h
 src/lua/*.lua.c
 src/box/lua/*.lua.c
 src/tarantool
+src/trivia/tarantool.h
 tarantool-*.tar.gz
 test/lib/*.pyc
 test/lib/*/*.pyc
@@ -63,3 +64,7 @@ third_party/luajit/src/lj_recdef.h
 third_party/luajit/src/lj_vm.s
 VERSION
 src/00000000000000000001.snap
+
+doc/sphinx/_build/*
+!doc/sphinx/_build/.gitignore
+doc/www/content/doc

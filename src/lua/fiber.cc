@@ -42,7 +42,7 @@ extern "C" {
  * }}}
  */
 
-/* {{{ box.fiber Lua library: access to Tarantool fibers
+/* {{{ fiber Lua library: access to Tarantool fibers
  *
  * Each fiber can be running, suspended or dead.
  * When a fiber is created (fiber.create()) it's
@@ -182,8 +182,12 @@ lbox_isfiber(struct lua_State *L, int narg)
 static int
 lbox_fiber_id(struct lua_State *L)
 {
-	struct fiber *f = lua_gettop(L) ? lbox_checkfiber(L, 1) : fiber();
-	lua_pushinteger(L, f->fid);
+	uint32_t fid;
+	if (lua_gettop(L)  == 0)
+		fid = fiber()->fid;
+	else
+		fid = *(uint32_t *) luaL_checkudata(L, 1, fiberlib_name);
+	lua_pushinteger(L, fid);
 	return 1;
 }
 

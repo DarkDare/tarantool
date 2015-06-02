@@ -45,7 +45,6 @@ struct CoioGuard {
 	~CoioGuard() { ev_io_stop(loop(), ev_io); }
 };
 
-typedef void (*ev_io_cb)(ev_loop *, ev_io *, int);
 typedef void (*ev_stat_cb)(ev_loop *, ev_stat *, int);
 
 /** Note: this function does not throw */
@@ -54,23 +53,8 @@ coio_init(struct ev_io *coio)
 {
 	/* Prepare for ev events. */
 	coio->data = fiber();
-	ev_init(coio, (ev_io_cb) fiber_schedule);
+	ev_init(coio, (ev_io_cb) fiber_schedule_cb);
 	coio->fd = -1;
-}
-
-static inline void
-coio_fiber_yield(struct ev_io *coio)
-{
-	/**
-	 * We may create an event in one fiber, but wait for it
-	 * in another. Hence we set the coroutine right before the
-	 * yield.
-	 */
-	coio->data = fiber();
-	fiber_yield();
-#ifdef DEBUG
-	coio->data = NULL;
-#endif
 }
 
 static inline bool
@@ -210,7 +194,16 @@ coio_connect_timeout(struct ev_io *coio, struct uri *uri, struct sockaddr *addr,
 		coio_fill_addrinfo(&ai_local, host, service, uri->host_hint);
 		ai = &ai_local;
 	} else {
-		ai = coeio_resolve(SOCK_STREAM, host, service, delay);
+	    struct addrinfo hints;
+	    memset(&hints, 0, sizeof(struct addrinfo));
+	    hints.ai_family = AF_UNSPEC; /* Allow IPv4 or IPv6 */
+	    hints.ai_socktype = SOCK_STREAM;
+	    hints.ai_flags = AI_ADDRCONFIG|AI_NUMERICSERV|AI_PASSIVE;
+	    hints.ai_protocol = 0;
+	    int rc = coio_getaddrinfo(host, service, &hints, &ai, delay);
+	    if (rc != 0) {
+		ai = NULL;
+	    }
 	}
 	if (ai == NULL)
 		return -1; /* timeout */
@@ -665,10 +658,29 @@ coio_service_init(struct coio_service *service, const char *name,
 	service->handler_param = handler_param;
 }
 
+static void
+on_bind(void *arg)
+{
+	fiber_wakeup((struct fiber *) arg);
+}
+
+void
+coio_service_start(struct evio_service *service, const char *uri)
+{
+	assert(service->on_bind == NULL);
+	assert(service->on_bind_param == NULL);
+	service->on_bind = on_bind;
+	service->on_bind_param = fiber();
+	evio_service_start(service, uri);
+	fiber_yield();
+	service->on_bind_param = NULL;
+	service->on_bind = NULL;
+}
+
 void
 coio_stat_init(ev_stat *stat, const char *path)
 {
-	ev_stat_init(stat, (ev_stat_cb) fiber_schedule, path, 0.0);
+	ev_stat_init(stat, (ev_stat_cb) fiber_schedule_cb, path, 0.0);
 }
 
 void
@@ -694,7 +706,7 @@ coio_waitpid(pid_t pid)
 {
 	assert(cord_is_main());
 	ev_child cw;
-	ev_init(&cw, (ev_child_cb) fiber_schedule);
+	ev_init(&cw, (ev_child_cb) fiber_schedule_cb);
 	ev_child_set(&cw, pid, 0);
 	cw.data = fiber();
 	ev_child_start(loop(), &cw);

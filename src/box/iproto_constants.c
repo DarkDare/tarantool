@@ -58,10 +58,10 @@ const unsigned char iproto_key_type[IPROTO_KEY_MAX] =
 		/* 0x12 */	MP_UINT, /* IPROTO_LIMIT */
 		/* 0x13 */	MP_UINT, /* IPROTO_OFFSET */
 		/* 0x14 */	MP_UINT, /* IPROTO_ITERATOR */
+		/* 0x15 */	MP_UINT, /* IPROTO_INDEX_BASE */
 	/* }}} */
 
 	/* {{{ unused */
-		/* 0x15 */	MP_UINT,
 		/* 0x16 */	MP_UINT,
 		/* 0x17 */	MP_UINT,
 		/* 0x18 */	MP_UINT,
@@ -135,7 +135,7 @@ const char *iproto_key_strs[IPROTO_KEY_MAX] = {
 	"limit",            /* 0x12 */
 	"offset",           /* 0x13 */
 	"iterator",         /* 0x14 */
-	"",                 /* 0x15 */
+	"index_base",       /* 0x15 */
 	"",                 /* 0x16 */
 	"",                 /* 0x17 */
 	"",                 /* 0x18 */
@@ -150,9 +150,9 @@ const char *iproto_key_strs[IPROTO_KEY_MAX] = {
 	"tuple",            /* 0x21 */
 	"function name",    /* 0x22 */
 	"user name",        /* 0x23 */
-	"server UUID"       /* 0x24 */
-	"cluster UUID"      /* 0x25 */
-	"vector clock"      /* 0x26 */
-	"expr"              /* 0x27 */
+	"server UUID",      /* 0x24 */
+	"cluster UUID",     /* 0x25 */
+	"vector clock",     /* 0x26 */
+	"expression",       /* 0x27 */
 };
 

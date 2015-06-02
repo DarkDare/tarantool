@@ -70,7 +70,7 @@ s:close()
 s:close()
 
 ---
-- false
+- error: 'builtin/socket.lua:83: attempt to use closed socket'
 ...
 LISTEN = require('uri').parse(box.cfg.listen)
 ---
@@ -279,7 +279,7 @@ s:getsockopt('SOL_SOCKET', 'SO_DEBUG')
 ...
 s:setsockopt('SOL_SOCKET', 'SO_ACCEPTCONN', 1)
 ---
-- error: 'builtin/socket.lua:343: Socket option SO_ACCEPTCONN is read only'
+- error: 'builtin/socket.lua:357: Socket option SO_ACCEPTCONN is read only'
 ...
 s:getsockopt('SOL_SOCKET', 'SO_RCVBUF') > 32
 ---
@@ -358,7 +358,7 @@ sc:writable(10)
 ...
 sc:write('Hello, world')
 ---
-- true
+- 12
 ...
 sa, addr = s:accept()
 ---
@@ -392,7 +392,7 @@ sc:writable()
 ...
 sc:write(', again')
 ---
-- true
+- 7
 ...
 sa:read(8)
 ---
@@ -420,7 +420,7 @@ sc:writable()
 ...
 sc:send('abc')
 ---
-- true
+- 3
 ...
 sa:read(3)
 ---
@@ -428,7 +428,7 @@ sa:read(3)
 ...
 sc:send('Hello')
 ---
-- true
+- 5
 ...
 sa:readable()
 ---
@@ -444,15 +444,15 @@ sa:recv()
 ...
 sc:send('Hello')
 ---
-- true
+- 5
 ...
 sc:send(', world')
 ---
-- true
+- 7
 ...
 sc:send("\\nnew line")
 ---
-- true
+- 10
 ...
 sa:read('\\n', 1)
 ---
@@ -472,7 +472,7 @@ sa:read('ine', 0.1)
 ...
 sc:send('Hello, world')
 ---
-- true
+- 12
 ...
 sa:read(',', 1)
 ---
@@ -567,7 +567,7 @@ sa:nonblock(true)
 ...
 sa:send('Hello, world')
 ---
-- true
+- 12
 ...
 sc:recv()
 ---
@@ -590,18 +590,20 @@ os.remove('/tmp/tarantool-test-socket')
 - true
 ...
 --# setopt delimiter ';'
-function aexitst(ai, host, port)
+function aexitst(ai, hostnames, port)
     for i, a in pairs(ai) do
-        if a.host == host and a.port == port then
-            return true
+        for j, host in pairs(hostnames) do
+            if a.host == host and a.port == port then
+                return true
+            end
         end
     end
-    return false
+    return ai
 end;
 ---
 ...
 aexitst( socket.getaddrinfo('localhost', 'http', {  protocol = 'tcp',
-    type = 'SOCK_STREAM'}), '127.0.0.1', 80 );
+    type = 'SOCK_STREAM'}), {'127.0.0.1', '::1'}, 80 );
 ---
 - true
 ...
@@ -657,18 +659,16 @@ require('errno').strerror(sc:getsockopt('SOL_SOCKET', 'SO_ERROR'))
 - Connection refused
 ...
 --# setopt delimiter ';'
-json.encode(socket.getaddrinfo('ya.ru', '80',
-    { flags = { 'AI_NUMERICSERV', 'AI_NUMERICHOST', } }))
+socket.getaddrinfo('127.0.0.1', '80', { type = 'SOCK_DGRAM',
+    flags = { 'AI_NUMERICSERV', 'AI_NUMERICHOST', } });
 ---
-- '[]'
+- - host: 127.0.0.1
+    family: AF_INET
+    type: SOCK_DGRAM
+    protocol: udp
+    port: 80
 ...
 --# setopt delimiter ''
-json.encode(socket.getaddrinfo('ya.ru', '80',
-    { flags = { 'AI_NUMERICSERV', 'AI_NUMERICHOST', } }))
-
----
-- '[]'
-...
 sc = socket('AF_INET', 'SOCK_STREAM', 'tcp')
 ---
 ...
@@ -704,7 +704,7 @@ sc = socket('AF_INET', 'SOCK_DGRAM', 'udp')
 ...
 sc:sendto('127.0.0.1', 3548, 'Hello, world')
 ---
-- true
+- 12
 ...
 s:readable(10)
 ---
@@ -716,7 +716,7 @@ s:recv()
 ...
 sc:sendto('127.0.0.1', 3548, 'Hello, world, 2')
 ---
-- true
+- 15
 ...
 s:readable(10)
 ---
@@ -772,7 +772,7 @@ sc:sendto('127.0.0.1', s:name().port)
 ...
 sc:sendto('127.0.0.1', s:name().port, 'Hello, World!')
 ---
-- true
+- 13
 ...
 s:readable(1)
 ---
@@ -787,7 +787,7 @@ data
 ...
 s:sendto(from.host, from.port, 'Hello, hello!')
 ---
-- true
+- 13
 ...
 sc:readable(1)
 ---
@@ -830,7 +830,7 @@ string.match(tostring(s), ', peer') ~= nil
 ...
 s:write("HEAD / HTTP/1.0\r\nHost: tarantool.org\r\n\r\n")
 ---
-- true
+- 40
 ...
 header = s:read({chunk = 4000, delimiter = {"\n\n", "\r\n\r\n" }}, 1)
 ---
@@ -1028,7 +1028,7 @@ ch:get(1)
 ...
 s:error()
 ---
-- null
+- error: 'builtin/socket.lua:83: attempt to use closed socket'
 ...
 -- random port
 port = 33123
@@ -1322,7 +1322,7 @@ cnt
 ...
 client:write('hi')
 ---
-- true
+- 2
 ...
 client:read(123)
 ---

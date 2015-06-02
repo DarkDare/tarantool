@@ -33,7 +33,7 @@
 #include <stdio.h>
 
 #include "iproto_port.h"
-#include "tarantool.h"
+#include "main.h"
 #include "fiber.h"
 #include "say.h"
 #include "evio.h"
@@ -749,6 +749,7 @@ iproto_process(struct iproto_request *ireq)
 	struct obuf *out = &ireq->iobuf->out;
 	struct iproto_connection *con = ireq->connection;
 
+	ireq->session->sync = ireq->header.sync;
 	struct obuf_svp svp = obuf_create_svp(out);
 	try {
 		switch (ireq->header.type) {
@@ -923,8 +924,6 @@ static void
 iproto_on_bind(ev_loop * /* loop */, struct ev_async * /* watcher */,
 	      int /* events */)
 {
-	fiber_start(fiber_new("leave_local_hot_standby",
-			     (fiber_func) box_leave_local_standby_mode));
 }
 
 void
@@ -1000,7 +999,7 @@ iproto_init()
 	tt_pthread_mutex_unlock(&iproto_state.mutex);
 }
 
-static void*
+static void *
 iproto_thread(void * /* worker_args */)
 {
 	tt_pthread_mutex_lock(&iproto_state.mutex);

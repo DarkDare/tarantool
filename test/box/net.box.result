@@ -13,7 +13,7 @@ msgpack = require 'msgpack'
 LISTEN = require('uri').parse(box.cfg.listen)
 ---
 ...
-space = box.schema.create_space('net_box_test_space')
+space = box.schema.space.create('net_box_test_space')
 ---
 ...
 index = space:create_index('primary', { type = 'tree' })
@@ -26,9 +26,9 @@ log.info("create connection")
 cn = remote:new(LISTEN.host, LISTEN.service)
 ---
 ...
-cn:_wait_state({'active', 'error'}, 1)
+cn:_wait_state({active = true, error = true}, 1)
 ---
-- true
+- active
 ...
 log.info("state is %s", cn.state)
 ---
@@ -106,9 +106,9 @@ cn:eval('return ...', 1, 2, 3)
 ...
 cn:eval('return { k = "v1" }, true, {  xx = 10, yy = 15 }, nil')
 ---
-- {k: v1}
+- {'k': 'v1'}
 - true
-- {yy: 15, xx: 10}
+- {'yy': 15, 'xx': 10}
 - null
 ...
 cn:eval('return nil')
@@ -228,11 +228,11 @@ cn.space.net_box_test_space:insert{234, 1,2,3}
 ...
 cn.space.net_box_test_space:insert{234, 1,2,3}
 ---
-- error: Duplicate key exists in unique index 0
+- error: Duplicate key exists in unique index 'primary' in space 'net_box_test_space'
 ...
 cn.space.net_box_test_space.insert{234, 1,2,3}
 ---
-- error: 'builtin/net.box.lua:242: Use space:method(...) instead space.method(...)'
+- error: 'builtin/net.box.lua:236: Use space:method(...) instead space.method(...)'
 ...
 cn.space.net_box_test_space:replace{354, 1,2,3}
 ---
@@ -287,9 +287,13 @@ cn.space.net_box_test_space:select{123}
 ---
 - - [123, 347]
 ...
-cn.space.net_box_test_space:update({123}, { { '=', 1, 2 } })
+cn.space.net_box_test_space:insert(cn.space.net_box_test_space:get{123}:update{ { '=', 1, 2 } })
 ---
 - [2, 347]
+...
+cn.space.net_box_test_space:delete{123}
+---
+- [123, 347]
 ...
 cn.space.net_box_test_space:select{2}
 ---
@@ -346,6 +350,12 @@ cn.space.net_box_test_space:select({}, { iterator = 'ALL' })
 - - [234, 1, 2, 3]
   - [354, 1, 2, 4]
 ...
+-- gh-841: net.box uses incorrect iterator type for select with no arguments
+cn.space.net_box_test_space:select()
+---
+- - [234, 1, 2, 3]
+  - [354, 1, 2, 4]
+...
 cn.space.net_box_test_space.index.primary:min()
 ---
 - [234, 1, 2, 3]
@@ -395,9 +405,9 @@ cn:call('test_foo')
 cn = remote:new(LISTEN.host, LISTEN.service, { reconnect_after = .1 })
 ---
 ...
-cn:_wait_state({'active'}, 1)
+cn:_wait_state({active = true}, 1)
 ---
-- true
+- active
 ...
 cn.space ~= nil
 ---
@@ -411,9 +421,9 @@ cn.space.net_box_test_space:select({}, { iterator = 'ALL' })
 cn:_fatal 'Test error'
 ---
 ...
-cn:_wait_state({'active', 'activew'}, 2)
+cn:_wait_state({active = true, activew = true}, 2)
 ---
-- true
+- active
 ...
 cn:ping()
 ---
@@ -584,7 +594,6 @@ cn:timeout(.01):call('ret_after', 1)
 ...
 cn = remote:timeout(0.0000000001):new(LISTEN.host, LISTEN.service, { user = 'netbox', password = '123' })
 ---
-- error: Timeout exceeded
 ...
 cn = remote:timeout(1):new(LISTEN.host, LISTEN.service, { user = 'netbox', password = '123' })
 ---
@@ -601,84 +610,50 @@ remote.self:timeout(123).space.net_box_test_space:select{234}
 ---
 - - [234, 1, 2, 3]
 ...
+remote.self:is_connected()
+---
+- true
+...
+remote.self:wait_connected()
+---
+- true
+...
 -- cleanup database after tests
 space:drop()
 ---
 ...
 -- admin console tests
-function console_test(...) return { ... } end
+cnc = remote:new(os.getenv('ADMIN'))
 ---
 ...
-function console_test_error(...) error(string.format(...)) end
----
-...
-function console_unpack_test(...) return ... end
----
-...
-ADMIN = require('uri').parse(os.getenv('ADMIN'))
----
-...
-cn = remote:new(LISTEN.host, LISTEN.service)
----
-...
-cnc = remote:new(ADMIN.host, ADMIN.service)
----
-...
-cnc.console
+cnc.console ~= nil
 ---
 - true
 ...
-cn:call('console_test', 1, 2, 3, 'string', nil)
+cnc:console('return 1, 2, 3, "string", nil')
 ---
-- - [1, 2, 3, 'string']
+- |
+  ---
+  - 1
+  - 2
+  - 3
+  - string
+  - null
+  ...
 ...
-cnc:call('console_test', 1, 2, 3, 'string', nil)
+cnc:console('error("test")')
 ---
-- - [1, 2, 3, 'string']
+- |
+  ---
+  - error: test
+  ...
 ...
-cn:call('console_test_error', 'error %d', 123)
+cnc:console('a = {1, 2, 3, 4}; return a[3]')
 ---
-- error: '[string "function console_test_error(...) error(string..."]:1: error 123'
-...
-cnc:call('console_test_error', 'error %d', 123)
----
-- error: '[string "function console_test_error(...) error(string..."]:1: error 123'
-...
-cn:call('console_unpack_test', 1)
----
-- - [1]
-...
-cnc:call('console_unpack_test', 1)
----
-- - [1]
-...
-cn:call('123')
----
-- error: Procedure '123' is not defined
-...
-cnc:call('123')
----
-- error: '[string "123()"]:1: unexpected symbol near ''123'''
-...
--- gh-649: String escaping doesn't work in remote console
-function echo(...) return ... end
----
-...
-#cn:call('echo', [[a \[\[ \091\091 b \093\093 c \n d \t e \]\] f ]])[1][1]
----
-- 46
-...
-#cnc:call('echo', [[a \[\[ \091\091 b \093\093 c \n d \t e \]\] f ]])[1][1]
----
-- 46
-...
-#cn:call('echo', "a [[ \091\091 b \093\093 c \n d \t e ]] f ")[1][1]
----
-- 28
-...
-#cnc:call('echo', "a [[ \091\091 b \093\093 c \n d \t e ]] f ")[1][1]
----
-- 28
+- |
+  ---
+  - 3
+  ...
 ...
 -- #545 user or password is not defined
 remote:new(LISTEN.host, LISTEN.service, { user = 'test' })
@@ -690,25 +665,31 @@ remote:new(LISTEN.host, LISTEN.service, { password = 'test' })
 - error: 'net.box: user is not defined'
 ...
 -- #544 usage for remote[point]method
-cn:call('console_test')
+cn = remote:new(LISTEN.host, LISTEN.service)
 ---
-- - []
 ...
-cn.call('console_test')
+cn:eval('return true')
 ---
-- error: 'usage: remote:call(proc_name, ...)'
+- true
+...
+cn.eval('return true')
+---
+- error: 'usage: remote:eval(expr, ...)'
 ...
 cn.ping()
 ---
 - error: 'usage: remote:ping()'
 ...
-remote.self:call('console_test')
+cn:close()
 ---
-- []
 ...
-remote.self.call('console_test')
+remote.self:eval('return true')
 ---
-- error: 'usage: remote:call(proc_name, ...)'
+- true
+...
+remote.self.eval('return true')
+---
+- error: 'usage: remote:eval(expr, ...)'
 ...
 -- uri as the first argument
 uri = string.format('%s:%s@%s:%s', 'netbox', 'test', LISTEN.host, LISTEN.service)
@@ -756,19 +737,11 @@ gh594()
 ---
 ...
 -- #636: Reload schema on demand
-sp = box.schema.create_space('test_old')
+sp = box.schema.space.create('test_old')
 ---
 ...
-sp:create_index('primary')
+_ = sp:create_index('primary')
 ---
-- unique: true
-  parts:
-  - type: NUM
-    fieldno: 1
-  id: 0
-  space_id: 512
-  name: primary
-  type: TREE
 ...
 sp:insert{1, 2, 3}
 ---
@@ -789,19 +762,11 @@ con.space.test == nil
 ---
 - true
 ...
-sp = box.schema.create_space('test')
+sp = box.schema.space.create('test')
 ---
 ...
-sp:create_index('primary')
+_ = sp:create_index('primary')
 ---
-- unique: true
-  parts:
-  - type: NUM
-    fieldno: 1
-  id: 0
-  space_id: 513
-  name: primary
-  type: TREE
 ...
 sp:insert{2, 3, 4}
 ---

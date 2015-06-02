@@ -28,7 +28,7 @@
  */
 #include "lua/init.h"
 #include "lua/utils.h"
-#include "tarantool.h"
+#include "main.h"
 #include "box/box.h"
 #if defined(__FreeBSD__) || defined(__APPLE__)
 #include "libgen.h"
@@ -67,6 +67,7 @@ struct lua_State *tarantool_L;
  * The fiber running the startup Lua script
  */
 struct fiber *script_fiber;
+bool start_loop = true;
 
 /* contents of src/lua/ files */
 extern char uuid_lua[],
@@ -79,7 +80,7 @@ extern char uuid_lua[],
 	uri_lua[],
 	bsdsocket_lua[],
 	console_lua[],
-	box_net_box_lua[],
+	net_box_lua[],
 	help_lua[],
 	help_en_US_lua[],
 	tap_lua[],
@@ -96,7 +97,7 @@ static const char *lua_modules[] = {
 	"uri", uri_lua,
 	"fio", fio_lua,
 	"socket", bsdsocket_lua,
-	"net.box", box_net_box_lua,
+	"net.box", net_box_lua,
 	"console", console_lua,
 	"tap", tap_lua,
 	"help.en_US", help_en_US_lua,
@@ -127,7 +128,7 @@ lbox_tonumber64(struct lua_State *L)
 		errno = 0;
 		unsigned long long result = strtoull(arg, &arge, 10);
 		if (errno == 0 && arge != arg) {
-			luaL_pushnumber64(L, result);
+			luaL_pushuint64(L, result);
 			return 1;
 		}
 		break;
@@ -190,7 +191,10 @@ tarantool_console_readline(struct lua_State *L)
 	}
 
 	char *line;
-	coeio_custom(readline_cb, TIMEOUT_INFINITY, &line, prompt);
+	if (coio_call(readline_cb, &line, prompt) != 0) {
+		lua_pushnil(L);
+		return 1;
+	}
 	auto scoped_guard = make_scoped_guard([&] { free(line); });
 	if (!line) {
 		lua_pushnil(L);
@@ -330,12 +334,14 @@ tarantool_lua_init(const char *tarantool_bin, int argc, char **argv)
 	luaopen_json(L);
 	lua_pop(L, 1);
 
+#if defined(HAVE_GNU_READLINE)
 	/*
 	 * Disable libreadline signals handlers. All signals are handled in
 	 * main thread by libev watchers.
 	 */
 	rl_catch_signals = 0;
 	rl_catch_sigwinch = 0;
+#endif
 	static const struct luaL_reg consolelib[] = {
 		{"readline", tarantool_console_readline},
 		{"add_history", tarantool_console_add_history},
@@ -425,6 +431,7 @@ run_script(va_list ap)
 		lua_getfield(L, -1, "start");
 		lua_remove(L, -2); /* remove package.loaded.console */
 		lua_remove(L, -2); /* remove package.loaded */
+		start_loop = false;
 	}
 	try {
 		lua_checkstack(L, argc - 1);

@@ -12,6 +12,7 @@ void box_set_readahead(int readahead);
 void box_set_io_collect_interval(double interval);
 void box_set_too_long_threshold(double threshold);
 void box_set_snap_io_rate_limit(double limit);
+void box_set_panic_on_wal_error(int);
 ]])
 
 local log = require('log')
@@ -21,16 +22,17 @@ local default_sophia_cfg = {
     memory_limit = 0,
     threads      = 5,
     node_size    = 134217728,
-    page_size    = 131072
+    page_size    = 131072,
+    compression  = "none"
 }
 
 -- all available options
 local default_cfg = {
     listen              = nil,
     slab_alloc_arena    = 1.0,
-    slab_alloc_minimal  = 64,
+    slab_alloc_minimal  = 16,
     slab_alloc_maximal  = 1024 * 1024,
-    slab_alloc_factor   = 2.0,
+    slab_alloc_factor   = 1.1,
     work_dir            = nil,
     snap_dir            = ".",
     wal_dir             = ".",
@@ -45,9 +47,9 @@ local default_cfg = {
     too_long_threshold  = 0.5,
     wal_mode            = "write",
     rows_per_wal        = 500000,
-    wal_dir_rescan_delay= 0.1,
+    wal_dir_rescan_delay= 2,
     panic_on_snap_error = true,
-    panic_on_wal_error  = false,
+    panic_on_wal_error  = true,
     replication_source  = nil,
     custom_proc_title   = nil,
     pid_file            = nil,
@@ -65,7 +67,8 @@ local sophia_template_cfg = {
     memory_limit = 'number',
     threads      = 'number',
     node_size    = 'number',
-    page_size    = 'number'
+    page_size    = 'number',
+    compression  = 'string'
 }
 
 -- types of available options
@@ -93,7 +96,7 @@ local template_cfg = {
     wal_dir_rescan_delay= 'number',
     panic_on_snap_error = 'boolean',
     panic_on_wal_error  = 'boolean',
-    replication_source  = 'string',
+    replication_source  = 'string, number',
     custom_proc_title   = 'string',
     pid_file            = 'string',
     background          = 'boolean',
@@ -104,8 +107,8 @@ local template_cfg = {
 }
 
 local function normalize_uri(port)
-    if port == nil then
-        return nil
+    if port == nil or type(port) == 'table' then
+        return port
     end
     return tostring(port);
 end
@@ -113,6 +116,7 @@ end
 -- options that require special handling
 local modify_cfg = {
     listen             = normalize_uri,
+    replication_source = normalize_uri,
 }
 
 -- dynamically settable options
@@ -125,10 +129,20 @@ local dynamic_cfg = {
     readahead               = ffi.C.box_set_readahead,
     too_long_threshold      = ffi.C.box_set_too_long_threshold,
     snap_io_rate_limit      = ffi.C.box_set_snap_io_rate_limit,
-
+    panic_on_wal_error      = ffi.C.box_set_panic_on_wal_error,
     -- snapshot_daemon
     snapshot_period         = box.internal.snapshot_daemon.set_snapshot_period,
     snapshot_count          = box.internal.snapshot_daemon.set_snapshot_count,
+    -- do nothing, affects new replicas, which query this value on start
+    wal_dir_rescan_delay    = function() end
+}
+
+local dynamic_cfg_skip_at_load = {
+    wal_mode                = true,
+    listen                  = true,
+    replication_source      = true,
+    wal_dir_rescan_delay    = true,
+    panic_on_wal_error      = true,
 }
 
 local function prepare_cfg(cfg, default_cfg, template_cfg, modify_cfg, prefix)
@@ -142,13 +156,13 @@ local function prepare_cfg(cfg, default_cfg, template_cfg, modify_cfg, prefix)
     if cfg.dont_check then
         return
     end
-    readable_prefix = ''
+    local readable_prefix = ''
     if prefix ~= nil and prefix ~= '' then
         readable_prefix = prefix .. '.'
     end
     local new_cfg = {}
     for k,v in pairs(cfg) do
-        readable_name = readable_prefix .. k;
+        local readable_name = readable_prefix .. k;
         if template_cfg[k] == nil then
             error("Error: cfg parameter '" .. readable_name .. "' is unexpected")
         elseif v == "" or v == nil then
@@ -237,7 +251,7 @@ local function load_cfg(cfg)
     box.cfg = cfg
     if not pcall(ffi.C.check_cfg) then
         box.cfg = load_cfg -- restore original box.cfg
-        return box.error() -- re-throw exception from check_cfg(0
+        return box.error() -- re-throw exception from check_cfg()
     end
     -- Restore box members after initial configuration
     for k, v in pairs(box_configured) do
@@ -255,7 +269,7 @@ local function load_cfg(cfg)
     ffi.C.load_cfg()
     for key, fun in pairs(dynamic_cfg) do
         local val = cfg[key]
-        if val ~= nil then
+        if val ~= nil and not dynamic_cfg_skip_at_load[key] then
             fun(cfg[key])
             if val ~= default_cfg[key] then
                 log.info("set '%s' configuration option to '%s'", key, val)

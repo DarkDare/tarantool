@@ -291,10 +291,10 @@ luamp_decode(struct lua_State *L, struct luaL_serializer *cfg,
 	double d;
 	switch (mp_typeof(**data)) {
 	case MP_UINT:
-		luaL_pushnumber64(L, mp_decode_uint(data));
+		luaL_pushuint64(L, mp_decode_uint(data));
 		break;
 	case MP_INT:
-		luaL_pushinumber64(L, mp_decode_int(data));
+		luaL_pushint64(L, mp_decode_int(data));
 		break;
 	case MP_FLOAT:
 		d = mp_decode_float(data);
@@ -331,25 +331,25 @@ luamp_decode(struct lua_State *L, struct luaL_serializer *cfg,
 	{
 		uint32_t size = mp_decode_array(data);
 		lua_createtable(L, size, 0);
-		if (cfg->decode_save_metatables)
-			luaL_setarrayhint(L, -1);
 		for (uint32_t i = 0; i < size; i++) {
 			luamp_decode(L, cfg, data);
 			lua_rawseti(L, -2, i + 1);
 		}
+		if (cfg->decode_save_metatables)
+			luaL_setarrayhint(L, -1);
 		return;
 	}
 	case MP_MAP:
 	{
 		uint32_t size = mp_decode_map(data);
 		lua_createtable(L, 0, size);
-		if (cfg->decode_save_metatables)
-			luaL_setmaphint(L, -1);
 		for (uint32_t i = 0; i < size; i++) {
 			luamp_decode(L, cfg, data);
 			luamp_decode(L, cfg, data);
 			lua_settable(L, -3);
 		}
+		if (cfg->decode_save_metatables)
+			luaL_setmaphint(L, -1);
 		return;
 	}
 	case MP_EXT:
@@ -418,14 +418,13 @@ const luaL_reg msgpacklib[] = {
 static int
 lua_msgpack_new(lua_State *L)
 {
-	luaL_newserializer(L, msgpacklib);
+	luaL_newserializer(L, NULL, msgpacklib);
 	return 1;
 }
 
 LUALIB_API int
 luaopen_msgpack(lua_State *L)
 {
-	luaL_msgpack_default = luaL_newserializer(L, msgpacklib);
-	luaL_register_module(L, "msgpack", NULL);
+	luaL_msgpack_default = luaL_newserializer(L, "msgpack", msgpacklib);
 	return 1;
 }

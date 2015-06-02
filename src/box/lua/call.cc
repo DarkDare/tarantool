@@ -224,6 +224,7 @@ port_ffi_add_tuple(struct port *port, struct tuple *tuple)
 		port_ffi->ret = ret;
 		port_ffi->capacity = capacity;
 	}
+	tuple_ref(tuple);
 	port_ffi->ret[port_ffi->size++] = tuple;
 }
 
@@ -239,15 +240,24 @@ port_ffi_create(struct port_ffi *port)
 	port->vtab = &port_ffi_vtab;
 }
 
+static inline void
+port_ffi_clear(struct port_ffi *port)
+{
+	for (uint32_t i = 0; i < port->size; i++) {
+		tuple_unref(port->ret[i]);
+		port->ret[i] = NULL;
+	}
+	port->size = 0;
+}
+
 void
 port_ffi_destroy(struct port_ffi *port)
 {
 	free(port->ret);
-	port->capacity = port->size = 0;
 }
 
 int
-boxffi_select(struct port *port, uint32_t space_id, uint32_t index_id,
+boxffi_select(struct port_ffi *port, uint32_t space_id, uint32_t index_id,
 	      int iterator, uint32_t offset, uint32_t limit,
 	      const char *key, const char *key_end)
 {
@@ -261,10 +271,21 @@ boxffi_select(struct port *port, uint32_t space_id, uint32_t index_id,
 	request.key = key;
 	request.key_end = key_end;
 
+	/*
+	 * A single instance of port_ffi object is used
+	 * for all selects, reset it.
+	 */
+	port->size = 0;
 	try {
-		box_process(&request, port);
+		box_process(&request, (struct port *) port);
 		return 0;
 	} catch (Exception *e) {
+		/*
+		 * The tuples will be not blessed and garbage
+		 * collected, unreference them here, to avoid
+		 * a leak.
+		 */
+		port_ffi_clear(port);
 		/* will be hanled by box.error() in Lua */
 		return -1;
 	}
@@ -307,7 +328,7 @@ lbox_update(lua_State *L)
 	struct request request;
 	struct port_lua port;
 	lbox_request_create(&request, L, IPROTO_UPDATE, 3, 4);
-	request.field_base = 1; /* field ids are one-indexed */
+	request.index_base = 1; /* field ids are one-indexed */
 	port_lua_create(&port, L);
 	/* Ignore index_id for now */
 	box_process(&request, (struct port *) &port);
@@ -327,6 +348,27 @@ lbox_delete(lua_State *L)
 	/* Ignore index_id for now */
 	box_process(&request, (struct port *) &port);
 	return lua_gettop(L) - 3;
+}
+
+static int
+lbox_commit(lua_State * /* L */)
+{
+	struct txn *txn = in_txn();
+	/**
+	 * COMMIT is like BEGIN or ROLLBACK
+	 * a "transaction-initiating statement".
+	 * Do nothing if transaction is not started,
+	 * it's the same as BEGIN + COMMIT.
+	*/
+	if (! txn)
+		return 0;
+	try {
+		txn_commit(txn);
+	} catch (...) {
+		txn_rollback();
+		throw;
+	}
+	return 0;
 }
 
 /**
@@ -435,7 +477,7 @@ SetuidGuard::SetuidGuard(const char *name, uint32_t name_len,
 	 * No special check for ADMIN user is necessary
 	 * since ADMIN has universal access.
 	 */
-	if (orig_credentials->universal_access & PRIV_ALL)
+	if ((orig_credentials->universal_access & PRIV_ALL) == PRIV_ALL)
 		return;
 	access &= ~orig_credentials->universal_access;
 	/*
@@ -484,6 +526,27 @@ SetuidGuard::~SetuidGuard()
 {
 	if (setuid)
 		fiber_set_user(fiber(), orig_credentials);
+}
+
+/**
+ * A quick approximation if a Lua table is an array.
+ *
+ * JSON can only have strings as keys, so if the first
+ * table key is 1, it's definitely not a json map,
+ * and very likely an array.
+ */
+static inline bool
+lua_isarray(struct lua_State *L, int i)
+{
+	if (lua_istable(L, i) == false)
+		return false;
+	lua_pushnil(L);
+	if (lua_next(L, i) == 0) /* the table is empty */
+		return true;
+	bool index_starts_at_1 = lua_isnumber(L, -2) &&
+		lua_tonumber(L, -2) == 1;
+	lua_pop(L, 2);
+	return index_starts_at_1;
 }
 
 /**
@@ -540,7 +603,7 @@ execute_call(lua_State *L, struct request *request, struct obuf *out)
 
 	/** Check if we deal with a table of tables. */
 	int nrets = lua_gettop(L);
-	if (nrets == 1 && lua_istable(L, 1)) {
+	if (nrets == 1 && lua_isarray(L, 1)) {
 		/*
 		 * The table is not empty and consists of tables
 		 * or tuples. Treat each table element as a tuple,
@@ -561,7 +624,7 @@ execute_call(lua_State *L, struct request *request, struct obuf *out)
 		}
 	}
 	for (int i = 1; i <= nrets; ++i) {
-		if (lua_istable(L, i) || lua_istuple(L, i)) {
+		if (lua_isarray(L, i) || lua_istuple(L, i)) {
 			luamp_encode_tuple(L, luaL_msgpack_default, out, i);
 		} else {
 			luamp_encode_array(luaL_msgpack_default, out, 1);
@@ -582,10 +645,16 @@ box_lua_call(struct request *request, struct obuf *out)
 		L = lua_newthread(tarantool_L);
 		LuarefGuard coro_ref(tarantool_L);
 		execute_call(L, request, out);
+		if (in_txn()) {
+			say_warn("a transaction is active at CALL return");
+			txn_rollback();
+		}
 	} catch (Exception *e) {
+		txn_rollback();
 		/* Let all well-behaved exceptions pass through. */
 		throw;
 	} catch (...) {
+		txn_rollback();
 		/* Convert Lua error to a Tarantool exception. */
 		tnt_raise(LuajitError, L != NULL ? L : tarantool_L);
 	}
@@ -655,6 +724,7 @@ lbox_snapshot(struct lua_State *L)
 
 static const struct luaL_reg boxlib[] = {
 	{"snapshot", lbox_snapshot},
+	{"commit", lbox_commit},
 	{NULL, NULL}
 };
 
@@ -671,9 +741,10 @@ static const struct luaL_reg boxlib_internal[] = {
 void
 box_lua_init(struct lua_State *L)
 {
+	/* Use luaL_register() to set _G.box */
 	luaL_register(L, "box", boxlib);
 	lua_pop(L, 1);
-	luaL_register_module(L, "box.internal", boxlib_internal);
+	luaL_register(L, "box.internal", boxlib_internal);
 	lua_pop(L, 1);
 
 	box_lua_error_init(L);

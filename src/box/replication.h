@@ -28,18 +28,26 @@
  * THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
+#include "evio.h"
+
 struct xrow_header;
 
-/**
- * Pre-fork replication spawner process.
- *
- * @return None. Panics and exits on error.
- */
-void
-replication_prefork(const char *snap_dir, const char *wal_dir);
+/** State of a replication relay. */
+class Relay {
+public:
+	/** Replica connection */
+	struct ev_io io;
+	/* Request sync */
+	uint64_t sync;
+	struct recovery_state *r;
+	ev_tstamp wal_dir_rescan_delay;
+	Relay(int fd_arg, uint64_t sync_arg);
+	~Relay();
+};
 
 void
-replication_join(int fd, struct xrow_header *packet);
+replication_join(int fd, struct xrow_header *packet,
+		 void (*on_join)(const struct tt_uuid *));
 
 /**
  * Subscribe a replica to updates.
@@ -48,6 +56,9 @@ replication_join(int fd, struct xrow_header *packet);
  */
 void
 replication_subscribe(int fd, struct xrow_header *packet);
+
+void
+relay_send(Relay *relay, struct xrow_header *packet);
 
 #endif // TARANTOOL_REPLICATION_H_INCLUDED
 

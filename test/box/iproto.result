@@ -12,68 +12,44 @@ box.schema.user.grant('guest', 'read,write,execute', 'universe')
 # send the package with invalid length
 12
 # check that is server alive
-ping
----
-- ok
-...
+True
 
 #  Test gh-206 "Segfault if sending IPROTO package without `KEY` field"
 
 IPROTO_SELECT
 query {'IPROTO_CODE': 1} {'IPROTO_SPACE_ID': 280}
-ping
----
-- ok
-...
+True
 
 
 IPROTO_DELETE
 query {'IPROTO_CODE': 5} {'IPROTO_SPACE_ID': 280}
-ping
----
-- ok
-...
+True
 
 
 IPROTO_UPDATE
 query {'IPROTO_CODE': 4} {'IPROTO_SPACE_ID': 280}
-ping
----
-- ok
-...
+True
 query {'IPROTO_CODE': 4} {'IPROTO_SPACE_ID': 280, 'IPROTO_KEY': (1,)}
-ping
----
-- ok
-...
+True
 
 
 IPROTO_REPLACE
 query {'IPROTO_CODE': 3} {'IPROTO_SPACE_ID': 280}
-ping
----
-- ok
-...
+True
 
 
 IPROTO_CALL
 query {'IPROTO_CODE': 6} {}
-ping
----
-- ok
-...
+True
 query {'IPROTO_CODE': 6} {'IPROTO_KEY': ('procname',)}
-ping
----
-- ok
-...
+True
 
 
 box.cfg.wal_mode
 ---
 - write
 ...
-space = box.schema.create_space('test', { id = 567 })
+space = box.schema.space.create('test', { id = 567 })
 ---
 ...
 index = space:create_index('primary', { type = 'hash' })
@@ -101,7 +77,7 @@ box.schema.user.grant('guest', 'read,write,execute', 'space', 'test')
 space:drop()
 ---
 ...
-space = box.schema.create_space('test')
+space = box.schema.space.create('test')
 ---
 ...
 index = space:create_index('primary', { type = 'hash', parts = {1, 'str'}})
@@ -148,5 +124,8 @@ STR 65536
 0xdb00010000 => ok ok ok
 
 space:drop()
+---
+...
+box.schema.user.revoke('guest', 'read,write,execute', 'universe')
 ---
 ...

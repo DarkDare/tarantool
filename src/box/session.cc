@@ -76,6 +76,7 @@ session_create(int fd, uint64_t cookie)
 	session->id = sid_max();
 	session->fd =  fd;
 	session->cookie = cookie;
+	session->sync = 0;
 	/* For on_connect triggers. */
 	credentials_init(&session->credentials, guest_user);
 	if (fd >= 0)
@@ -100,7 +101,7 @@ session_create_on_demand()
 	/* Create session on demand */
 	struct session *s = session_create(-1, 0);
 	s->fiber_on_stop = {
-		rlist_nil, session_on_stop, NULL, NULL
+		RLIST_LINK_INITIALIZER, session_on_stop, NULL, NULL
 	};
 	/* Add a trigger to destroy session on fiber stop */
 	trigger_add(&fiber()->on_stop, &s->fiber_on_stop);

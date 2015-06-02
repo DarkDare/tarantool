@@ -32,6 +32,7 @@
 #include "box/space.h"
 #include "box/schema.h"
 #include "box/user_def.h"
+#include "box/tuple.h"
 #include "box/lua/tuple.h"
 #include "fiber.h"
 
@@ -44,6 +45,16 @@ check_index(uint32_t space_id, uint32_t index_id)
 	struct space *space = space_cache_find(space_id);
 	access_check_space(space, PRIV_R);
 	return index_find(space, index_id);
+}
+
+size_t
+boxffi_index_bsize(uint32_t space_id, uint32_t index_id)
+{
+       try {
+               return check_index(space_id, index_id)->bsize();
+       } catch (Exception *) {
+               return (size_t) -1; /* handled by box.error() in Lua */
+       }
 }
 
 size_t
@@ -60,9 +71,93 @@ struct tuple *
 boxffi_index_random(uint32_t space_id, uint32_t index_id, uint32_t rnd)
 {
 	try {
-		return check_index(space_id, index_id)->random(rnd);
+		Index *index = check_index(space_id, index_id);
+		struct tuple *tuple = index->random(rnd);
+		if (tuple == NULL)
+			return NULL;
+		tuple_ref(tuple); /* must not throw in this case */
+		return tuple;
 	}  catch (Exception *) {
 		return (struct tuple *) -1; /* handled by box.error() in Lua */
+	}
+}
+
+struct tuple *
+boxffi_index_get(uint32_t space_id, uint32_t index_id, const char *key)
+{
+	try {
+		Index *index = check_index(space_id, index_id);
+		if (!index->key_def->is_unique)
+			tnt_raise(ClientError, ER_MORE_THAN_ONE_TUPLE);
+		uint32_t part_count = key ? mp_decode_array(&key) : 0;
+		primary_key_validate(index->key_def, key, part_count);
+		struct tuple *tuple = index->findByKey(key, part_count);
+		if (tuple == NULL)
+			return NULL;
+		tuple_ref(tuple); /* must not throw in this case */
+		return tuple;
+	}  catch (Exception *) {
+		return (struct tuple *) -1; /* handled by box.error() in Lua */
+	}
+}
+
+struct tuple *
+boxffi_index_min(uint32_t space_id, uint32_t index_id, const char *key)
+{
+	try {
+		Index *index = check_index(space_id, index_id);
+		if (index->key_def->type != TREE) {
+			/* Show nice error messages in Lua */
+			tnt_raise(ClientError, ER_UNSUPPORTED,
+				  index_type_strs[index->key_def->type],
+				  "min()");
+		}
+		uint32_t part_count = key ? mp_decode_array(&key) : 0;
+		key_validate(index->key_def, ITER_GE, key, part_count);
+		struct tuple *tuple = index->min(key, part_count);
+		if (tuple == NULL)
+			return NULL;
+		tuple_ref(tuple); /* must not throw in this case */
+		return tuple;
+	}  catch (Exception *) {
+		return (struct tuple *) -1; /* handled by box.error() in Lua */
+	}
+}
+
+struct tuple *
+boxffi_index_max(uint32_t space_id, uint32_t index_id, const char *key)
+{
+	try {
+		Index *index = check_index(space_id, index_id);
+		if (index->key_def->type != TREE) {
+			/* Show nice error messages in Lua */
+			tnt_raise(ClientError, ER_UNSUPPORTED,
+				  index_type_strs[index->key_def->type],
+				  "max()");
+		}
+		uint32_t part_count = key ? mp_decode_array(&key) : 0;
+		key_validate(index->key_def, ITER_LE, key, part_count);
+		struct tuple *tuple = index->max(key, part_count);
+		if (tuple == NULL)
+			return NULL;
+		tuple_ref(tuple); /* must not throw in this case */
+		return tuple;
+	}  catch (Exception *) {
+		return (struct tuple *) -1; /* handled by box.error() in Lua */
+	}
+}
+
+ssize_t
+boxffi_index_count(uint32_t space_id, uint32_t index_id, int type, const char *key)
+{
+	enum iterator_type itype = (enum iterator_type) type;
+	try {
+		Index *index = check_index(space_id, index_id);
+		uint32_t part_count = key ? mp_decode_array(&key) : 0;
+		key_validate(index->key_def, itype, key, part_count);
+		return index->count(itype, key, part_count);
+	} catch (Exception *) {
+		return -1; /* handled by box.error() in Lua */
 	}
 }
 
@@ -110,20 +205,27 @@ boxffi_index_iterator(uint32_t space_id, uint32_t index_id, int type,
 struct tuple*
 boxffi_iterator_next(struct iterator *itr)
 {
-	if (itr->sc_version != sc_version) {
-		try {
+	try {
+		if (itr->sc_version != sc_version) {
 			Index *index = check_index(itr->space_id, itr->index_id);
 			if (index != itr->index)
 				return NULL;
 			if (index->sc_version > itr->sc_version)
 				return NULL;
 			itr->sc_version = sc_version;
-		} catch (Exception *) {
-			/* space or index does not exist, nothing to fetch */
-			return NULL;
 		}
+	} catch (Exception *) {
+		return NULL; /* invalidate iterator */
 	}
-	return itr->next(itr);
+	try {
+		struct tuple *tuple = itr->next(itr);
+		if (tuple == NULL)
+			return NULL;
+		tuple_ref(tuple); /* must not throw in this case */
+		return tuple;
+	} catch (Exception *) {
+		return (struct tuple *) -1; /* handled by box.error() in Lua */
+	}
 }
 
 /* }}} */
@@ -136,7 +238,7 @@ box_lua_index_init(struct lua_State *L)
 	};
 
 	/* box.index */
-	luaL_register(L, "box.index", indexlib);
+	luaL_register_module(L, "box.index", indexlib);
 	box_index_init_iterator_types(L, -2);
 	lua_pop(L, 1);
 }

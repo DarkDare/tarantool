@@ -50,7 +50,19 @@ public:
 	virtual void initIterator(struct iterator *iterator,
 				  enum iterator_type type,
 				  const char *key, uint32_t part_count) const;
-	virtual size_t memsize() const;
+
+	/**
+	 * Create a read view for iterator so further index modifications
+	 * will not affect the iterator iteration.
+	 */
+	virtual void createReadViewForIterator(struct iterator *iterator);
+	/**
+	 * Destroy a read view of an iterator. Must be called for iterators,
+	 * for which createReadViewForIterator was called.
+	 */
+	virtual void destroyReadViewForIterator(struct iterator *iterator);
+
+	virtual size_t bsize() const;
 
 protected:
 	struct light_index_core *hash_table;

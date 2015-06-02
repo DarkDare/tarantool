@@ -27,12 +27,18 @@
  * SUCH DAMAGE.
  */
 #include "coeio.h"
-#include "fiber.h"
-#include "exception.h"
-#include <errno.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <unistd.h>
+#include <netdb.h>
+#include <sys/socket.h>
+
+#include "fiber.h"
+#include "exception.h"
+#include "third_party/tarantool_ev.h"
 
 /*
  * Asynchronous IO Tasks (libeio wrapper).
@@ -116,31 +122,11 @@ coeio_reinit(void)
 	eio_init(coeio_want_poll_cb, NULL);
 }
 
-/**
- * A single task context.
- */
-struct coeio_task {
-	/** The calling fiber. */
-	struct fiber *fiber;
-	/** The callback. */
-	ssize_t (*func)(va_list ap);
-	/**
-	 * If the callback sets errno, it's preserved across the
-	 * call.
-	 */
-	/** Callback arguments. */
-	va_list ap;
-	/** Callback results. */
-	ssize_t result;
-	int complete;
-	int errorno;
-};
-
 static void
-coeio_custom_cb(eio_req *req)
+coio_on_exec(eio_req *req)
 {
-	struct coeio_task *task = (struct coeio_task *) req->data;
-	req->result = task->func(task->ap);
+	struct coio_task *task = (struct coio_task *) req;
+	req->result = task->task_cb(task);
 }
 
 /**
@@ -148,23 +134,56 @@ coeio_custom_cb(eio_req *req)
  * eio_request is complete.
  */
 static int
-coeio_on_complete(eio_req *req)
+coio_on_finish(eio_req *req)
 {
-	/*
-	 * Don't touch the task if the request is cancelled:
-	 * the task is allocated on the caller's stack and
-	 * may be already gone. Don't wakeup the caller
-	 * if the task is cancelled: in this case the caller
-	 * is already woken up, avoid double wake-up.
-	 */
-	if (! EIO_CANCELLED(req)) {
-		struct coeio_task *task = (struct coeio_task *) req->data;
-		task->result = req->result;
-		task->errorno = req->errorno;
-		task->complete = 1;
-		fiber_wakeup(task->fiber);
+	struct coio_task *task = (struct coio_task *) req;
+	if (task->fiber == NULL) {
+		/* timed out (only coio_task() )*/
+		if (task->timeout_cb != NULL) {
+			task->timeout_cb(task);
+		}
+		return 0;
 	}
+
+	task->complete = 1;
+	fiber_wakeup(task->fiber);
 	return 0;
+}
+
+ssize_t
+coio_task(struct coio_task *task, coio_task_cb func,
+	  coio_task_timeout_cb on_timeout, double timeout)
+{
+	/* from eio.c: REQ() definition */
+	memset(&task->base, 0, sizeof(task->base));
+	task->base.type = EIO_CUSTOM;
+	task->base.feed = coio_on_exec;
+	task->base.finish = coio_on_finish;
+	/* task->base.destroy = NULL; */
+	/* task->base.pri = 0; */
+
+	task->fiber = fiber();
+	task->task_cb = func;
+	task->timeout_cb = on_timeout;
+	task->complete = 0;
+
+	eio_submit(&task->base);
+
+	if (fiber_yield_timeout(timeout) && !task->complete) {
+		/* timed out. */
+		task->fiber = NULL;
+		errno = ETIMEDOUT;
+		return -1;
+	}
+
+	return task->base.result;
+}
+
+static void
+coio_on_call(eio_req *req)
+{
+	struct coio_task *task = (struct coio_task *) req;
+	req->result = task->call_cb(task->ap);
 }
 
 /**
@@ -178,7 +197,6 @@ coeio_on_complete(eio_req *req)
  * func sets errno, the errno is preserved across the call.
  *
  * @retval -1 and errno = ENOMEM if failed to create a task
- * @retval -1 and errno = ETIMEDOUT if timed out
  * @retval the function return (errno is preserved).
  *
  * @code
@@ -189,102 +207,149 @@ coeio_on_complete(eio_req *req)
  *	         return open(filename, flags);
  *	}
  *
- *	 if (coeio_custom(openfile_cb, 0.10, "/tmp/file", 0) == -1)
+ *	 if (coio_call(openfile_cb, 0.10, "/tmp/file", 0) == -1)
  *		// handle errors.
  *	...
  */
 ssize_t
-coeio_custom(ssize_t (*func)(va_list ap), ev_tstamp timeout, ...)
+coio_call(ssize_t (*func)(va_list ap), ...)
 {
-	struct coeio_task task;
-	task.fiber = fiber();
-	task.func = func;
-	task.result = -1;
-	task.complete = 0;
-	/*
-	 * Cancelling a fiber which is suspended
-	 * on coeio_custom task would destroy
-	 * its stack and crash the server when
-	 * this stack is accessed in the worker thread.
-	 */
+	struct coio_task *task = (struct coio_task *) calloc(1, sizeof(*task));
+	if (task == NULL)
+		return -1; /* errno = ENOMEM */
+	/* from eio.c: REQ() definition */
+	task->base.type = EIO_CUSTOM;
+	task->base.feed = coio_on_call;
+	task->base.finish = coio_on_finish;
+	/* task->base.destroy = NULL; */
+	/* task->base.pri = 0; */
+
+	task->fiber = fiber();
+	task->call_cb = func;
+	task->complete = 0;
+
 	bool cancellable = fiber_set_cancellable(false);
-	va_start(task.ap, timeout);
-	struct eio_req *req = eio_custom(coeio_custom_cb, 0,
-					 coeio_on_complete, &task);
-	if (req == NULL) {
-		errno = ENOMEM;
-	} else if (fiber_yield_timeout(timeout) && !task.complete) {
-		/* timeout. */
-		errno = ETIMEDOUT;
-		task.result = -1;
-		eio_cancel(req);
-	} else {
-		/* the task is complete. */
-		errno = task.errorno;
-	}
-	va_end(task.ap);
+
+	va_start(task->ap, func);
+	eio_submit(&task->base);
+
+	fiber_yield();
+	assert(task->complete);
+	va_end(task->ap);
+
 	fiber_set_cancellable(cancellable);
-	return task.result;
+
+	ssize_t result = task->base.result;
+	int save_errno = errno;
+	free(task);
+	errno = save_errno;
+	return result;
 }
+
+struct async_getaddrinfo_task {
+	struct coio_task base;
+	struct addrinfo *result;
+	int rc;
+	char *host;
+	char *port;
+	struct addrinfo hints;
+};
+
+#ifndef EAI_ADDRFAMILY
+#define EAI_ADDRFAMILY EAI_BADFLAGS /* EAI_ADDRFAMILY is deprecated on BSD */
+#endif
 
 /*
  * Resolver function, run in separate thread by
  * coeio (libeio).
 */
 static ssize_t
-getaddrinfo_cb(va_list ap)
+getaddrinfo_cb(struct coio_task *ptr)
 {
-	const char *host = va_arg(ap, const char *);
-	const char *port = va_arg(ap, const char *);
-	struct addrinfo *hints = va_arg(ap, struct addrinfo *);
-	struct addrinfo **res = va_arg(ap, struct addrinfo **);
+	struct async_getaddrinfo_task *task =
+		(struct async_getaddrinfo_task *) ptr;
 
-	int rc = getaddrinfo(host, port, hints, res);
+	task->rc = getaddrinfo(task->host, task->port, &task->hints,
+			     &task->result);
+
 	/* getaddrinfo can return EAI_ADDRFAMILY on attempt
 	 * to resolve ::1, if machine has no public ipv6 addresses
 	 * configured. Retry without AI_ADDRCONFIG flag set.
 	 *
 	 * See for details: https://bugs.launchpad.net/tarantool/+bug/1160877
 	 */
-
-	/* EAI_ADDRFAMILY is deprecated on FreeBSD */
-	if (rc == EAI_BADFLAGS
-#ifdef EAI_ADDRFAMILY
-	    || rc == EAI_ADDRFAMILY
-#endif
-	   ) {
-		hints->ai_flags &= ~AI_ADDRCONFIG;
-		rc = getaddrinfo(host, port, hints, res);
-	}
-	if (rc) {
-		errno = ERESOLVE;
-		return -1;
+	if ((task->rc == EAI_BADFLAGS || task->rc == EAI_ADDRFAMILY) &&
+	    (task->hints.ai_flags & AI_ADDRCONFIG)) {
+		task->hints.ai_flags &= ~AI_ADDRCONFIG;
+		task->rc = getaddrinfo(task->host, task->port, &task->hints,
+			     &task->result);
 	}
 	return 0;
 }
 
-struct addrinfo *
-coeio_resolve(int socktype, const char *host, const char *port,
-              ev_tstamp timeout)
+static void
+getaddrinfo_free_cb(struct coio_task *ptr)
 {
-	/* Fill hinting information for use by connect(2) or bind(2). */
-	struct addrinfo *result = NULL;
-	struct addrinfo hints;
-	memset(&hints, 0, sizeof(struct addrinfo));
-	hints.ai_family = AF_UNSPEC; /* Allow IPv4 or IPv6 */
-	hints.ai_socktype = socktype;
-	hints.ai_flags = AI_ADDRCONFIG|AI_NUMERICSERV|AI_PASSIVE;
-	hints.ai_protocol = 0;
-	/* do resolving */
-	errno = 0;
-	/* make no difference between empty string and NULL for host */
-	if (coeio_custom(getaddrinfo_cb, timeout, (host && *host) ? host : NULL,
-			 port, &hints, &result))
-		return NULL;
-	return result;
+	struct async_getaddrinfo_task *task =
+		(struct async_getaddrinfo_task *) ptr;
+	free(task->host);
+	free(task->port);
+	if (task->result != NULL)
+		freeaddrinfo(task->result);
+	free(task);
 }
 
-ssize_t
+int
+coio_getaddrinfo(const char *host, const char *port,
+		 const struct addrinfo *hints, struct addrinfo **res,
+		 double timeout)
+{
+	int rc = EAI_SYSTEM;
+	int save_errno = 0;
+
+	struct async_getaddrinfo_task *task =
+		(struct async_getaddrinfo_task *) calloc(1, sizeof(*task));
+	if (task == NULL)
+		return rc;
+
+	/* Fill hinting information for use by connect(2) or bind(2). */
+	memcpy(&task->hints, hints, sizeof(task->hints));
+	/* make no difference between empty string and NULL for host */
+	if (host != NULL && *host) {
+		task->host = strdup(host);
+		if (task->host == NULL) {
+			save_errno = errno;
+			goto cleanup_task;
+		}
+	}
+	if (port != NULL) {
+		task->port = strdup(port);
+		if (task->port == NULL) {
+			save_errno = errno;
+			goto cleanup_host;
+		}
+	}
+	/* do resolving */
+	/* coio_task() don't throw. */
+	if (coio_task(&task->base, getaddrinfo_cb, getaddrinfo_free_cb,
+		       timeout) == -1) {
+		/* timed out */
+		errno = ETIMEDOUT;
+		return rc;
+	}
+
+	rc = task->rc;
+	*res = task->result;
+	free(task->port);
+cleanup_host:
+	free(task->host);
+cleanup_task:
+	free(task);
+	errno = save_errno;
+	return rc;
+}
+
+static ssize_t
 cord_cojoin_cb(va_list ap)
 {
 	struct cord *cord = va_arg(ap, struct cord *);
@@ -297,7 +362,7 @@ int
 cord_cojoin(struct cord *cord)
 {
 	assert(cord() != cord); /* Can't join self. */
-	int rc = coeio_custom(cord_cojoin_cb, TIMEOUT_INFINITY, cord);
+	int rc = coio_call(cord_cojoin_cb, cord);
 	if (rc == 0 && cord->fiber->exception) {
 		Exception::move(&cord->fiber->exception, &fiber()->exception);
 		cord_destroy(cord);

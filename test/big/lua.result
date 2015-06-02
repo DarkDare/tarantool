@@ -1,4 +1,4 @@
-space = box.schema.create_space('tweedledum')
+space = box.schema.space.create('tweedledum')
 ---
 ...
 tmp = space:create_index('primary', { type = 'hash', parts = {1, 'str'}, unique = true })
@@ -32,7 +32,7 @@ space.index['minmax']:get{'new', 'world'}
 --  https://bugs.launchpad.net/tarantool/+bug/904208
 space.index['minmax']:get{'new', 'world', 'order'}
 ---
-- error: Invalid key part count (expected [0..2], got 3)
+- error: Invalid key part count in an exact match (expected 2, got 3)
 ...
 space:delete{'brave'}
 ---
@@ -47,7 +47,7 @@ space:insert{'item 1', 'alabama', 'song'}
 ...
 space.index['minmax']:get{'alabama'}
 ---
-- ['item 1', 'alabama', 'song']
+- error: Invalid key part count in an exact match (expected 2, got 1)
 ...
 space:insert{'item 2', 'california', 'dreaming '}
 ---
@@ -106,7 +106,7 @@ space:insert{'1', 'hello', 'world'}
 ...
 space:insert{'2', 'hello', 'world'}
 ---
-- error: Duplicate key exists in unique index 1
+- error: Duplicate key exists in unique index 'minmax' in space 'tweedledum'
 ...
 space:drop()
 ---
@@ -114,7 +114,7 @@ space:drop()
 --
 -- Check range scan over multipart keys
 --
-space = box.schema.create_space('tweedledum')
+space = box.schema.space.create('tweedledum')
 ---
 ...
 tmp = space:create_index('primary', { type = 'hash', parts = {1, 'num'}, unique = true })
@@ -165,7 +165,7 @@ space:drop()
 --
 -- Lua 64bit numbers support
 --
-space = box.schema.create_space('tweedledum')
+space = box.schema.space.create('tweedledum')
 ---
 ...
 tmp = space:create_index('primary', { type  = 'tree', parts = {1, 'num'}, unique = true })
@@ -272,7 +272,7 @@ space:drop()
 --
 -- lua select_reverse_range() testing
 -- https://blueprints.launchpad.net/tarantool/+spec/backward-tree-index-iterator
-space = box.schema.create_space('tweedledum')
+space = box.schema.space.create('tweedledum')
 ---
 ...
 tmp = space:create_index('primary', { type = 'tree', parts = {1, 'num'}, unique = true })
@@ -360,7 +360,7 @@ space:drop()
 --
 -- Tests for box.index iterators
 --
-space = box.schema.create_space('tweedledum')
+space = box.schema.space.create('tweedledum')
 ---
 ...
 tmp = space:create_index('primary', { type = 'tree', parts = {1, 'str'}, unique = true })
@@ -484,7 +484,7 @@ space:drop()
 -- Tests for lua idx:count()
 --
 -- https://blueprints.launchpad.net/tarantool/+spec/lua-builtin-size-of-subtree
-space = box.schema.create_space('tweedledum')
+space = box.schema.space.create('tweedledum')
 ---
 ...
 tmp = space:create_index('primary', { type = 'hash', parts = {1, 'num'}, unique = true })
@@ -574,7 +574,7 @@ space.index['i1']:count()
 -- Test cases for #123: box.index.count does not check arguments properly
 space.index['i1']:count(function() end)
 ---
-- error: 'builtin/msgpackffi.lua:262: can not encode Lua type: ''function'''
+- error: 'builtin/msgpackffi.lua:261: can not encode Lua type: ''function'''
 ...
 space:drop()
 ---
@@ -582,7 +582,7 @@ space:drop()
 --
 -- Tests for lua tuple:transform()
 --
-space = box.schema.create_space('tweedledum')
+space = box.schema.space.create('tweedledum')
 ---
 ...
 tmp = space:create_index('primary', { type = 'hash', parts = {1, 'str'}, unique = true })
@@ -734,7 +734,7 @@ t:find(2, '2')
 ...
 t:find(89, '2')
 ---
-- error: '[string "-- tuple.lua (internal file)..."]:91: error: invalid key to ''next'''
+- error: '[string "-- tuple.lua (internal file)..."]:84: error: invalid key to ''next'''
 ...
 t:findall(4, '3')
 ---
@@ -765,7 +765,7 @@ space:drop()
 -- http://bugs.launchpad.net/tarantool/+bug/1038784
 --  https://bugs.launchpad.net/tarantool/+bug/1006354
 --  lua box.auto_increment() testing
-space = box.schema.create_space('tweedledum')
+space = box.schema.space.create('tweedledum')
 ---
 ...
 tmp = space:create_index('primary', { type = 'tree', parts = {1, 'num'}, unique = true })
@@ -849,7 +849,7 @@ space:drop()
 -- Truncate hangs when primary key is not in linear or starts at the first field
 -- https://bugs.launchpad.net/tarantool/+bug/1042798
 --
-space = box.schema.create_space('tweedledum')
+space = box.schema.space.create('tweedledum')
 ---
 ...
 tmp = space:create_index('primary', { type = 'tree', parts = {3, 'num', 2, 'num'}, unique = true })
@@ -899,7 +899,7 @@ space:drop()
 dofile('index_random_test.lua')
 ---
 ...
-space = box.schema.create_space('tweedledum')
+space = box.schema.space.create('tweedledum')
 ---
 ...
 tmp = space:create_index('primary', { type = 'tree', parts = {1, 'num'}, unique = true })

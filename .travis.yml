@@ -3,13 +3,11 @@ compiler:
   - clang
   - gcc
 
-branches:
-  only:
-    - master
-    - stable
-
 addons:
   postgresql: "9.1"
+
+before_install:
+  - git submodule update --init --recursive
 
 before_script:
   - psql -c "CREATE USER tarantool WITH PASSWORD 'tarantool';" -U postgres
@@ -29,6 +27,7 @@ install:
 script:
   - mkdir ./build && cd ./build && cmake .. -DCMAKE_BUILD_TYPE=RelWithDebugInfo
   - make -j8
+  - make test-force || echo
 
 notifications:
   irc:

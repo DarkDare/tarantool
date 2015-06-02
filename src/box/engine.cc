@@ -33,42 +33,67 @@
 #include "salad/rlist.h"
 #include <stdlib.h>
 #include <string.h>
+#include <latch.h>
 
 RLIST_HEAD(engines);
 
-uint32_t engine_flags[BOX_ENGINE_MAX];
-int n_engines;
+extern bool snapshot_in_progress;
+extern struct latch schema_lock;
 
 Engine::Engine(const char *engine_name)
 	:name(engine_name),
-	 link(RLIST_INITIALIZER(link))
+	 link(RLIST_HEAD_INITIALIZER(link))
 {}
 
 void Engine::init()
 {}
 
-void Engine::begin(struct txn*, struct space*)
+void Engine::beginStatement(struct txn *)
 {}
 
-void Engine::commit(struct txn*)
+void Engine::prepare(struct txn *)
 {}
 
-void Engine::rollback(struct txn*)
+void Engine::commit(struct txn *)
 {}
+
+void Engine::rollback(struct txn *)
+{}
+
+void Engine::rollbackStatement(struct txn_stmt *)
+{}
+
+void Engine::initSystemSpace(struct space * /* space */)
+{
+	panic("not implemented");
+}
+
+void
+Engine::addPrimaryKey(struct space * /* space */)
+{
+}
+
+void
+Engine::dropPrimaryKey(struct space * /* space */)
+{
+}
+
+bool Engine::needToBuildSecondaryKey(struct space * /* space */)
+{
+	return true;
+}
 
 Handler::Handler(Engine *f)
 	:engine(f)
 {
-	/* derive recovery state from engine */
-	initRecovery();
 }
 
 /** Register engine instance. */
 void engine_register(Engine *engine)
 {
+	static int n_engines;
 	rlist_add_tail_entry(&engines, engine, link);
-	engine->id = ++n_engines;
-	engine_flags[engine->id] = engine->flags;
+	engine->id = n_engines++;
 }
 
 /** Find engine by name. */
@@ -93,40 +118,23 @@ void engine_shutdown()
 }
 
 void
-engine_begin_recover_snapshot(int64_t snapshot_lsn)
+engine_recover_to_checkpoint(int64_t checkpoint_id)
 {
 	/* recover engine snapshot */
 	Engine *engine;
 	engine_foreach(engine) {
-		engine->begin_recover_snapshot(snapshot_lsn);
-	}
-}
-
-static void
-do_one_recover_step(struct space *space, void * /* param */)
-{
-	if (space_index(space, 0)) {
-		space->handler->recover(space);
-	} else {
-		/* in case of space has no primary index,
-		 * derive it's engine handler recovery state from
-		 * the global one. */
-		space->handler->initRecovery();
+		engine->recoverToCheckpoint(checkpoint_id);
 	}
 }
 
 void
-engine_end_recover_snapshot()
+engine_begin_join()
 {
-	/*
-	 * For all new spaces created from now on, when the
-	 * PRIMARY key is added, enable it right away.
-	 */
+	/* recover engine snapshot */
 	Engine *engine;
 	engine_foreach(engine) {
-		engine->end_recover_snapshot();
+		engine->beginJoin();
 	}
-	space_foreach(do_one_recover_step, NULL);
 }
 
 void
@@ -138,44 +146,53 @@ engine_end_recovery()
 	 */
 	Engine *engine;
 	engine_foreach(engine)
-		engine->end_recovery();
-
-	space_foreach(do_one_recover_step, NULL);
+		engine->endRecovery();
 }
 
 int
 engine_checkpoint(int64_t checkpoint_id)
 {
-	static bool snapshot_is_in_progress = false;
-	if (snapshot_is_in_progress)
+	if (snapshot_in_progress)
 		return EINPROGRESS;
 
-	snapshot_is_in_progress = true;
+	snapshot_in_progress = true;
+	latch_lock(&schema_lock);
 
 	/* create engine snapshot */
 	Engine *engine;
 	engine_foreach(engine) {
-		if (engine->begin_checkpoint(checkpoint_id))
+		if (engine->beginCheckpoint(checkpoint_id))
 			goto error;
 	}
 
 	/* wait for engine snapshot completion */
 	engine_foreach(engine) {
-		if (engine->wait_checkpoint())
+		if (engine->waitCheckpoint())
 			goto error;
 	}
 
 	/* remove previous snapshot reference */
 	engine_foreach(engine) {
-		engine->commit_checkpoint();
+		engine->commitCheckpoint();
 	}
-	snapshot_is_in_progress = false;
+	latch_unlock(&schema_lock);
+	snapshot_in_progress = false;
 	return 0;
 error:
 	int save_errno = errno;
 	/* rollback snapshot creation */
 	engine_foreach(engine)
-		engine->abort_checkpoint();
-	snapshot_is_in_progress = false;
+		engine->abortCheckpoint();
+	latch_unlock(&schema_lock);
+	snapshot_in_progress = false;
 	return save_errno;
+}
+
+void
+engine_join(Relay *relay)
+{
+	Engine *engine;
+	engine_foreach(engine) {
+		engine->join(relay);
+	}
 }

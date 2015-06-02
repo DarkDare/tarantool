@@ -28,10 +28,7 @@
  */
 #include "replica.h"
 #include "recovery.h"
-#include "tarantool.h"
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include "main.h"
 
 #include "xlog.h"
 #include "fiber.h"
@@ -263,7 +260,7 @@ pull_from_remote(va_list ap)
 			remote_set_status(&r->remote, "off");
 			throw;
 		} catch (Exception *e) {
-			remote_set_status(&r->remote, "failed");
+			remote_set_status(&r->remote, "disconnected");
 			if (! r->remote.warning_said) {
 				if (err != NULL)
 					say_info("%s", err);
@@ -328,7 +325,7 @@ recovery_stop_remote(struct recovery_state *r)
 	 * If the remote died from an exception, don't throw it
 	 * up.
 	 */
-	Exception::cleanup(&f->exception);
+	Exception::clear(&f->exception);
 	fiber_join(f);
 	r->remote.status = "off";
 }

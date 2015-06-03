@@ -52,12 +52,15 @@ static uint64_t num_parts[16];
 static inline void*
 sophia_key(void *env, void *db, struct key_def *key_def,
            const char *key,
-           const char **keyend)
+           const char **keyend, int async)
 {
 	assert(key_def->part_count < 16);
 	void *o = sp_object(db);
 	if (o == NULL)
 		sophia_raise(env);
+	if (async) {
+		sp_set(o, "async", 1, fiber());
+	}
 	if (key == NULL)
 		return o;
 	int i = 0;
@@ -164,7 +167,7 @@ sophia_write(void *env, void *db, void *tx, enum sophia_op op,
 	const char *key = tuple_field(tuple, key_def->parts[0].fieldno);
 	const char *value;
 	size_t valuesize;
-	void *o = sophia_key(env, db, key_def, key, &value);
+	void *o = sophia_key(env, db, key_def, key, &value, 0);
 	valuesize = tuple->bsize - (value - tuple->data);
 	if (valuesize > 0)
 		sp_set(o, "value", value, valuesize);
@@ -187,13 +190,14 @@ sophia_read(void *env, void *db, void *tx, const char *key,
             struct tuple_format *format)
 {
 	const char *keyend;
-	void *o = sophia_key(env, db, key_def, key, &keyend);
-	void *result = sp_get((tx) ? tx: db, o);
+	void *o = sophia_key(env, db, key_def, key, &keyend, 1);
+	void *request = sp_get((tx) ? tx: db, o);
+	if (request == NULL)
+		return NULL;
+	fiber_yield();
+	void *result = sp_get(request, "result");
 	if (result == NULL)
 		return NULL;
-	auto scoped_guard =
-		make_scoped_guard([=] { sp_destroy(result); });
-
 	return (struct tuple *)sophia_tuple(result, key_def, format, NULL);
 }
 
@@ -430,10 +434,14 @@ sophia_iterator_next(struct iterator *ptr)
 	assert(ptr->next == sophia_iterator_next);
 	struct sophia_iterator *it = (struct sophia_iterator *) ptr;
 	assert(it->cursor != NULL);
-	void *o = sp_get(it->cursor);
-	if (o == NULL)
+	void *request = sp_get(it->cursor);
+	if (request == NULL)
 		return NULL;
-	return (struct tuple *)sophia_tuple(o, it->key_def, it->space->format, NULL);
+	fiber_yield();
+	void *result = sp_get(request, "result");
+	if (result == NULL)
+		return NULL;
+	return (struct tuple *)sophia_tuple(result, it->key_def, it->space->format, NULL);
 }
 
 struct tuple *
@@ -507,9 +515,10 @@ SophiaIndex::initIterator(struct iterator *ptr,
 		          "SophiaIndex", "requested iterator type");
 	}
 	it->base.next = sophia_iterator_next;
-	void *o = sophia_key(env, db, key_def, key, &it->keyend);
+	void *o = sophia_key(env, db, key_def, key, &it->keyend, 1);
 	sp_set(o, "order", compare);
 	it->cursor = sp_cursor(db, o);
 	if (it->cursor == NULL)
 		sophia_raise(env);
+	fiber_yield();
 }

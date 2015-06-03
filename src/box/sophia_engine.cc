@@ -106,9 +106,67 @@ SophiaEngine::SophiaEngine()
 	env = NULL;
 }
 
+static inline int
+sophia_poll(SophiaEngine *e)
+{
+	void *req = sp_poll(e->env);
+	if (req == NULL)
+		return 0;
+	struct fiber *fiber = (struct fiber *)sp_get(req, "arg");
+	fiber_call(fiber);
+	sp_destroy(req);
+	return 1;
+}
+
+static inline int
+sophia_queue(SophiaEngine *e)
+{
+	void *env = e->env;
+	void *c = sp_ctl(env);
+	void *o = sp_get(c, "scheduler.reqs");
+	if (o == NULL)
+		sophia_raise(env);
+	char *p = (char *)sp_get(o, "value", NULL);
+	uint32_t queue = atoi(p);
+	sp_destroy(o);
+	return queue;
+}
+
+static inline void
+sophia_on_event(void *arg)
+{
+	SophiaEngine *engine = (SophiaEngine *)arg;
+	ev_async_send(engine->cord->loop, &engine->watcher);
+}
+
+static void
+sophia_idle_cb(ev_loop *loop, struct ev_idle *w, int /* events */)
+{
+	SophiaEngine *engine = (SophiaEngine *)w->data;
+	sophia_poll(engine);
+	if (sophia_queue(engine) == 0)
+		ev_idle_stop(loop, w);
+}
+
+static void
+sophia_async_schedule(ev_loop *loop, struct ev_async *w, int /* events */)
+{
+	SophiaEngine *engine = (SophiaEngine *)w->data;
+	sophia_poll(engine);
+	if (sophia_queue(engine))
+		ev_idle_start(loop, &engine->idle);
+}
+
 void
 SophiaEngine::init()
 {
+	cord = cord();
+	ev_idle_init(&idle, sophia_idle_cb);
+	ev_async_init(&watcher, sophia_async_schedule);
+	ev_async_start(cord->loop, &watcher);
+	watcher.data = this;
+	idle.data = this;
+
 	env = sp_env();
 	if (env == NULL)
 		panic("failed to create sophia environment");
@@ -116,6 +174,11 @@ SophiaEngine::init()
 	sp_set(c, "sophia.path", cfg_gets("sophia_dir"));
 	sp_set(c, "sophia.path_create", "0");
 	sp_set(c, "scheduler.threads", cfg_gets("sophia.threads"));
+	char callback[64];
+	snprintf(callback, sizeof(callback), "pointer: %p", (void*)sophia_on_event);
+	char arg[64];
+	snprintf(arg, sizeof(arg), "pointer: %p", this);
+	sp_set(c, "scheduler.on_event", callback, arg);
 	sp_set(c, "memory.limit", cfg_gets("sophia.memory_limit"));
 	sp_set(c, "compaction.node_size", cfg_gets("sophia.node_size"));
 	sp_set(c, "compaction.page_size", cfg_gets("sophia.page_size"));
@@ -125,6 +188,18 @@ SophiaEngine::init()
 	int rc = sp_open(env);
 	if (rc == -1)
 		sophia_raise(env);
+}
+
+void
+SophiaEngine::endRecovery()
+{
+	if (recovery_complete)
+		return;
+	/* complete two-phase recovery */
+	int rc = sp_open(env);
+	if (rc == -1)
+		sophia_raise(env);
+	recovery_complete = 1;
 }
 
 Handler *
@@ -254,17 +329,6 @@ SophiaEngine::join(Relay *relay)
 	sp_destroy(db_cursor);
 }
 
-void
-SophiaEngine::endRecovery()
-{
-	if (recovery_complete)
-		return;
-	/* complete two-phase recovery */
-	int rc = sp_open(env);
-	if (rc == -1)
-		sophia_raise(env);
-	recovery_complete = 1;
-}
 
 Index*
 SophiaEngine::createIndex(struct key_def *key_def)

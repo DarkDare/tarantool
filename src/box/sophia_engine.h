@@ -56,6 +56,9 @@ private:
 	int64_t m_checkpoint_lsn;
 public:
 	int recovery_complete;
+	struct cord *cord;
+	ev_async watcher;
+	ev_idle idle;
 };
 
 void sophia_info(void (*)(const char*, const char*, void*), void*);

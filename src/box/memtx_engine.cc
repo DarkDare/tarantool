@@ -147,7 +147,7 @@ memtx_replace_primary_key(struct txn *txn, struct space *space,
 			  struct tuple *old_tuple, struct tuple *new_tuple,
 			  enum dup_replace_mode mode)
 {
-	(void) space->index[0]->replace(old_tuple, new_tuple, mode);
+	old_tuple = space->index[0]->replace(old_tuple, new_tuple, mode);
 	if (new_tuple)
 		tuple_ref(new_tuple);
 	memtx_txn_add_undo(txn, space, old_tuple, new_tuple);
@@ -267,7 +267,7 @@ recover_snap(struct recovery_state *r)
 	 */
 	if (res == NULL)
 		tnt_raise(ClientError, ER_MISSING_SNAPSHOT);
-	int64_t signature = vclock_signature(res);
+	int64_t signature = vclock_sum(res);
 
 	struct xlog *snap = xlog_open(&r->snap_dir, signature);
 	auto guard = make_scoped_guard([=]{

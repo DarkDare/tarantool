@@ -26,7 +26,7 @@ conn:ping()
 -- xxx: bug  currently selects no rows
 space:select{}
 ---
-- error: Invalid key part count in an exact match (expected 1, got 0)
+- []
 ...
 space:insert{1, 'I am a tuple'}
 ---
@@ -186,29 +186,12 @@ space:delete(0)
 space:delete(4294967295)
 ---
 ...
--- A test case for: http://bugs.launchpad.net/bugs/712456
--- Verify that when trying to access a non-existing or
--- very large space id, no crash occurs.
-conn.space[1]:select{}
----
-- error: '[string "return conn.space[1]:select{} "]:1: attempt to index a nil value'
-...
-conn.space[65537]:select{}
----
-- error: '[string "return conn.space[65537]:select{} "]:1: attempt to index a nil
-    value'
-...
-conn.space[4294967295]:select{}
----
-- error: '[string "return conn.space[4294967295]:select{} "]:1: attempt to index a
-    nil value'
-...
-box.space[0]:drop()
+box.space.test:drop()
 ---
 ...
 box.schema.user.drop('test')
 ---
 ...
--- A test case for: http://bugs.launchpad.net/bugs/716683
--- Admin console should not stall on unknown command.
---admin("show status", simple=True)
+space = nil
+---
+...

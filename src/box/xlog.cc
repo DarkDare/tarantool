@@ -64,6 +64,21 @@ XlogError::XlogError(const char *file, unsigned line,
 	va_end(ap);
 }
 
+XlogGapError::XlogGapError(const char *file, unsigned line,
+			   const struct vclock *from,
+			   const struct vclock *to)
+	:XlogError(file, line, "")
+{
+	char *s_from = vclock_to_string(from);
+	char *s_to = vclock_to_string(to);
+	snprintf(m_errmsg, sizeof(m_errmsg),
+		 "Missing .xlog file between LSN %lld %s and %lld %s",
+		 (long long) vclock_sum(from), s_from ? s_from : "",
+		 (long long) vclock_sum(to), s_to ? s_to : "");
+	free(s_from);
+	free(s_to);
+}
+
 /* {{{ struct xdir */
 
 void
@@ -290,7 +305,7 @@ xdir_scan(struct xdir *dir)
 	struct vclock *vclock = vclockset_first(&dir->index);
 	int i = 0;
 	while (i < s_count || vclock != NULL) {
-		int64_t s_old = vclock ? vclock_signature(vclock) : LLONG_MAX;
+		int64_t s_old = vclock ? vclock_sum(vclock) : LLONG_MAX;
 		int64_t s_new = i < s_count ? signatures[i] : LLONG_MAX;
 		if (s_old < s_new) {
 			/** Remove a deleted file from the index */
@@ -465,6 +480,7 @@ xlog_cursor_close(struct xlog_cursor *i)
 {
 	struct xlog *l = i->log;
 	l->rows += i->row_count;
+	l->eof_read = i->eof_read;
 	/*
 	 * Since we don't close the xlog
 	 * we must rewind it to the last known
@@ -764,7 +780,7 @@ xlog_read_meta(struct xlog *l, int64_t signature)
 	 * the sum of vector clock coordinates must be the same
 	 * as the name of the file.
 	 */
-	int64_t signature_check = vclock_signature(&l->vclock);
+	int64_t signature_check = vclock_sum(&l->vclock);
 	if (signature_check != signature) {
 		tnt_raise(XlogError, "%s: signature check failed",
 			  l->filename);
@@ -796,6 +812,7 @@ xlog_open_stream(struct xdir *dir, int64_t signature, FILE *file, const char *fi
 	l->mode = LOG_READ;
 	l->dir = dir;
 	l->is_inprogress = false;
+	l->eof_read = false;
 	vclock_create(&l->vclock);
 
 	xlog_read_meta(l, signature);
@@ -812,6 +829,30 @@ xlog_open(struct xdir *dir, int64_t signature)
 	return xlog_open_stream(dir, signature, f, filename);
 }
 
+int
+xlog_rename(struct xlog *l)
+{
+       char *filename = l->filename;
+       char new_filename[PATH_MAX];
+       char *suffix = strrchr(filename, '.');
+
+       assert(l->is_inprogress);
+       assert(suffix);
+       assert(strcmp(suffix, inprogress_suffix) == 0);
+
+       /* Create a new filename without '.inprogress' suffix. */
+       memcpy(new_filename, filename, suffix - filename);
+       new_filename[suffix - filename] = '\0';
+
+       if (rename(filename, new_filename) != 0) {
+               say_syserror("can't rename %s to %s", filename, new_filename);
+
+               return -1;
+       }
+       l->is_inprogress = false;
+       return 0;
+}
+
 /**
  * In case of error, writes a message to the server log
  * and sets errno.
@@ -823,7 +864,7 @@ xlog_create(struct xdir *dir, const struct vclock *vclock)
 	FILE *f = NULL;
 	struct xlog *l = NULL;
 
-	int64_t signature = vclock_signature(vclock);
+	int64_t signature = vclock_sum(vclock);
 	assert(signature >= 0);
 	assert(!tt_uuid_is_nil(dir->server_uuid));
 
@@ -838,10 +879,16 @@ xlog_create(struct xdir *dir, const struct vclock *vclock)
 	}
 
 	/*
-	 * For snapshots, open the <lsn>.<suffix>.inprogress file.
-	 * If it exists, open will fail.
+	 * Open the <lsn>.<suffix>.inprogress file.
+	 * If it exists, open will fail. Always open/create
+	 * a file with .inprogress suffix: for snapshots,
+	 * the rename is done when the snapshot is complete.
+	 * Fox xlogs, we can rename only when we have written
+	 * the log file header, otherwise replication relay
+	 * may think that this is a corrupt file and stop
+	 * replication.
 	 */
-	filename = format_filename(dir, signature, dir->suffix);
+	filename = format_filename(dir, signature, INPROGRESS);
 	f = fiob_open(filename, dir->open_wflags);
 	if (!f)
 		goto error;
@@ -853,10 +900,14 @@ xlog_create(struct xdir *dir, const struct vclock *vclock)
 	snprintf(l->filename, PATH_MAX, "%s", filename);
 	l->mode = LOG_WRITE;
 	l->dir = dir;
-	l->is_inprogress = dir->suffix == INPROGRESS;
+	l->is_inprogress = true;
+	/*  Makes no sense, but well. */
+	l->eof_read = false;
 	vclock_copy(&l->vclock, vclock);
 	setvbuf(l->f, NULL, _IONBF, 0);
 	if (xlog_write_meta(l) != 0)
+		goto error;
+	if (dir->suffix != INPROGRESS && xlog_rename(l))
 		goto error;
 
 	return l;

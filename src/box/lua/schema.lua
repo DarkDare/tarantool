@@ -579,6 +579,8 @@ local function check_iterator_type(opts, key_is_nil)
     return itype
 end
 
+internal.check_iterator_type = check_iterator_type -- export for net.box
+
 function box.schema.space.bless(space)
     local index_mt = {}
     -- __len and __index
@@ -684,26 +686,13 @@ function box.schema.space.bless(space)
     index_mt.select = function(index, key, opts)
         local offset = 0
         local limit = 4294967295
-        local iterator = box.index.EQ
 
         local key, key_end = msgpackffi.encode_tuple(key)
-        if key_end == key + 1 then -- empty array
-            iterator = box.index.ALL
-        end
+        local iterator = check_iterator_type(opts, key + 1 >= key_end)
 
         if opts ~= nil then
             if opts.offset ~= nil then
                 offset = opts.offset
-            end
-            if type(opts.iterator) == "string" then
-                local resolved_iter = box.index[string.upper(opts.iterator)]
-                if resolved_iter == nil then
-                    box.error(box.error.ITERATOR_TYPE, opts.iterator);
-                end
-                opts.iterator = resolved_iter
-            end
-            if opts.iterator ~= nil then
-                iterator = opts.iterator
             end
             if opts.limit ~= nil then
                 limit = opts.limit
@@ -900,6 +889,14 @@ local function privilege_resolve(privilege)
         numeric = privilege
     end
     return numeric
+end
+
+local function checked_privilege(privilege, object_type)
+    local priv_hex = privilege_resolve(privilege)
+    if object_type == 'role' and priv_hex ~= 4 then
+        box.error(box.error.UNSUPPORTED_ROLE_PRIV, privilege)
+    end
+    return priv_hex
 end
 
 local function privilege_name(privilege)
@@ -1103,13 +1100,10 @@ local function grant(uid, name, privilege, object_type,
         -- named 'execute'
         object_type = 'role'
         object_name = privilege
-    end
-    -- sanitize privilege type for role object type
-    if object_type == 'role' then
         privilege = 'execute'
     end
+    local privilege_hex = checked_privilege(privilege, object_type)
 
-    privilege_hex = privilege_resolve(privilege)
     local oid = object_resolve(object_type, object_name)
     if options == nil then
         options = {}
@@ -1153,10 +1147,10 @@ local function revoke(uid, name, privilege, object_type, object_name, options)
     if object_name == nil and object_type == nil then
         object_type = 'role'
         object_name = privilege
-        -- revoke everything possible from role,
-        -- to prevent stupid mistakes with privilege name
-        privilege = 'read,write,execute'
+        privilege = 'execute'
     end
+    local privilege_hex = checked_privilege(privilege, object_type)
+
     if options == nil then
         options = {}
     end
@@ -1177,16 +1171,15 @@ local function revoke(uid, name, privilege, object_type, object_name, options)
                       object_type, object_name)
         end
     end
-    privilege = privilege_resolve(privilege)
     local old_privilege = tuple[5]
     local grantor = tuple[1]
     -- sic:
     -- a user may revoke more than he/she granted
     -- (erroneous user input)
     --
-    privilege = bit.band(old_privilege, bit.bnot(privilege))
-    if privilege ~= 0 then
-        _priv:replace{grantor, uid, object_type, oid, privilege}
+    privilege_hex = bit.band(old_privilege, bit.bnot(privilege_hex))
+    if privilege_hex ~= 0 then
+        _priv:replace{grantor, uid, object_type, oid, privilege_hex}
     else
         _priv:delete{uid, object_type, oid}
     end
@@ -1312,3 +1305,19 @@ box.schema.role.revoke = function(user_name, ...)
     return revoke(uid, user_name, ...)
 end
 box.schema.role.info = box.schema.user.info
+
+-- 
+-- once
+--
+box.once = function(key, func, ...)
+    if type(key) ~= 'string' or type(func) ~= 'function' then
+        box.error(box.error.ILLEGAL_PARAMS, "Usage: box.once(key, func, ...)")
+    end
+    
+    local key = "once"..key
+    if box.space._schema:get{key} ~= nil then
+        return
+    end
+    box.space._schema:put{key}
+    return func(...)
+end

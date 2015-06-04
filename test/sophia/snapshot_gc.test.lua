@@ -1,7 +1,6 @@
 
 os.execute("rm -f *.snap")
 os.execute("rm -f *.xlog")
-os.execute("touch mt")
 
 --# stop server default
 --# start server default
@@ -36,7 +35,6 @@ sophia_dir()[1] -- 1
 
 os.execute("rm -f *.snap")
 os.execute("rm -f *.xlog")
-os.execute("rm -f mt")
 os.execute("rm -f lock")
 
 --# stop server default

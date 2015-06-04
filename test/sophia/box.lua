@@ -8,12 +8,8 @@ if not file_exists('lock') then
 end
 
 local sophia = {
-	threads = 0
+	threads = 3
 }
-
-if file_exists('mt') then
-	sophia.threads = 3
-end
 
 box.cfg {
     listen            = os.getenv("LISTEN"),

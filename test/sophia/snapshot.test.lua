@@ -3,7 +3,6 @@
 
 os.execute("rm -f *.snap")
 os.execute("rm -f *.xlog")
-os.execute("touch mt")
 
 --# stop server default
 --# start server default
@@ -14,7 +13,6 @@ index = space:create_index('primary')
 for key = 1, 351 do space:insert({key}) end
 box.snapshot()
 
-os.execute("rm -f mt")
 os.execute("touch lock")
 
 --# stop server default

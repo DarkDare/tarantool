@@ -182,6 +182,7 @@ SophiaEngine::init()
 	sp_set(c, "memory.limit", cfg_gets("sophia.memory_limit"));
 	sp_set(c, "compaction.node_size", cfg_gets("sophia.node_size"));
 	sp_set(c, "compaction.page_size", cfg_gets("sophia.page_size"));
+	sp_set(c, "compaction.0.async", "1");
 	sp_set(c, "log.enable", "0");
 	sp_set(c, "log.two_phase_recover", "1");
 	sp_set(c, "log.commit_lsn", "1");
@@ -308,8 +309,7 @@ SophiaEngine::join(Relay *relay)
 			key_def_delete(key_def);
 			sophia_raise(env);
 		}
-		while (sp_get(cursor)) {
-			o = sp_object(cursor);
+		while ((o = sp_get(cursor))) {
 			uint32_t tuple_size;
 			char *tuple = (char *)sophia_tuple(o, key_def, NULL, &tuple_size);
 			try {
@@ -328,7 +328,6 @@ SophiaEngine::join(Relay *relay)
 	}
 	sp_destroy(db_cursor);
 }
-
 
 Index*
 SophiaEngine::createIndex(struct key_def *key_def)

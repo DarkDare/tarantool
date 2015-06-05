@@ -3117,7 +3117,7 @@ ev_run (EV_P_ int flags)
 
             /* at this point, we NEED to wait, so we have to ensure */
             /* to pass a minimum nonzero value to the backend */
-            if (expect_false (waittime < backend_mintime))
+            if (expect_false (waittime > 0 && waittime < backend_mintime))
               waittime = backend_mintime;
 
             /* extra check because io_blocktime is commonly 0 */

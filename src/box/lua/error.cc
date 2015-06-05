@@ -101,7 +101,9 @@ raise:
 
 	/* see tnt_raise() */
 	say_debug("ClientError at %s:%i", file, line);
-	throw new ClientError(file, line, reason, code);
+	ClientError *e = new ClientError(file, line, reason, code);
+	Exception::add(&fiber()->exception, e);
+	throw e;
 	return 0;
 }
 

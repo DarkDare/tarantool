@@ -34,6 +34,9 @@
 
 enum { TNT_ERRMSG_MAX = 512 };
 
+class Exception;
+typedef Exception *DiagnosticArea;
+
 class Exception: public Object {
 protected:
 	/** Allocated size. */
@@ -58,31 +61,46 @@ public:
 	virtual void log() const;
 	virtual ~Exception() {}
 
-	static void init(Exception **what)
+	void ref() {
+		++m_ref;
+	}
+
+	void unref();
+
+	/*
+	 * DiagnosticArea methods
+	 */
+
+	static void init(DiagnosticArea *what)
 	{
 		*what = NULL;
 	}
 	/** Clear the last error saved in the current fiber's TLS */
-	static inline void clear(Exception **what)
+	static inline void clear(DiagnosticArea *what)
 	{
-		if (*what != NULL && (*what)->size > 0) {
-			(*what)->~Exception();
-			free(*what);
-		}
+		if (*what != NULL)
+			(*what)->unref();
 		Exception::init(what);
 	}
 	/** Move an exception from one thread to another. */
-	static void move(Exception **from, Exception **to)
+	static void move(DiagnosticArea *from, DiagnosticArea *to)
 	{
 		Exception::clear(to);
 		*to = *from;
 		Exception::init(from);
 	}
+
+	static void add(DiagnosticArea *to, Exception *e)
+	{
+		Exception::clear(to);
+		*to = e;
+		e->ref();
+	}
 protected:
 	Exception(const char *file, unsigned line);
-	/* The copy constructor is needed for C++ throw */
-	Exception(const Exception&);
 
+	/* Ref counter */
+	size_t m_ref;
 	/* file name */
 	const char *m_file;
 	/* line number */
@@ -131,9 +149,18 @@ public:
 		    const char *object);
 };
 
+/*
+ * A helper method for tnt_error() to avoid cyclic includes between
+ * fiber.h and exception.h. Please don't use outside of this file.
+ */
+DiagnosticArea *fiber_get_diagnostic();
+
 #define tnt_error(class, ...) ({					\
 	say_debug("%s at %s:%i", #class, __FILE__, __LINE__);		\
-	new class(__FILE__, __LINE__, ##__VA_ARGS__);			\
+	class *e = new class(__FILE__, __LINE__, ##__VA_ARGS__);	\
+	DiagnosticArea *diag = fiber_get_diagnostic();			\
+	Exception::add(diag, e);					\
+	e;								\
 })
 
 #define tnt_raise(...) do {						\

@@ -44,46 +44,81 @@ Exception::operator new(size_t size)
 {
 	struct fiber *fiber = fiber();
 
-	if (fiber->exception && fiber->exception->size == 0)
-		fiber->exception = NULL;
+	if (fiber->exception == &out_of_memory) {
+		Exception::clear(&fiber->exception);
+	} else if (fiber->exception) {
+		assert(fiber->exception->m_ref > 0);
+		if (fiber->exception->m_ref == 1 &&
+		    fiber->exception->size >= size) {
+			/*
+			 * Exception has only one reference - the fiber itself.
+			 */
 
-	if (fiber->exception) {
-		/* Explicitly call destructor for previous exception */
-		fiber->exception->~Exception();
-		if (fiber->exception->size >= size) {
-			/* Reuse memory allocated for exception */
-			return fiber->exception;
+			Exception *e = NULL;
+			Exception::move(&fiber->exception, &e);
+			/* Explicitly call destructor for previous exception */
+			e->~Exception();
+			e->m_ref = 0;
+			/* e is now a memory chunk, not Exception object */
+			return (void *) e;
+		} else {
+			/* Can't reuse exception */
+			Exception::clear(&fiber->exception);
 		}
-		free(fiber->exception);
 	}
-	fiber->exception = (Exception *) malloc(size);
-	if (fiber->exception) {
-		fiber->exception->size = size;
-		return fiber->exception;
+	assert(fiber->exception == NULL);
+	Exception *e = (Exception *) malloc(size);
+	if (e) {
+		e->m_ref = 0;
+		e->size = size;
+		return e;
 	}
 	fiber->exception = &out_of_memory;
+	fiber->exception->ref();
 	throw fiber->exception;
 }
 
 void
 Exception::operator delete(void * /* ptr */)
 {
-	/* Unsupported */
+	/*
+	 * Direct calling of `delete' is prohibited because Exception
+	 * implement reference counting. Please use ref()/unref() and
+	 * your object will be destroyed as soon as everybody stop use it.
+	 *
+	 * However, C++ can call `delete' implicitly on an exception from
+	 * constructor. Throwing exceptions from Exception constructor is
+	 * very weird idea. Just don't do that.
+	 */
 	assert(false);
 }
 
+DiagnosticArea *
+fiber_get_diagnostic()
+{
+	return &fiber()->exception;
+}
+
+void
+Exception::unref() {
+	assert(m_ref > 0);
+	--m_ref;
+	if (m_ref == 0) {
+		/* Equvivalent to `delete this' */
+		this->~Exception();
+		free(this);
+	}
+}
+
 Exception::Exception(const char *file, unsigned line)
-	: m_file(file), m_line(line)
-{
+	:  m_ref(0), m_file(file), m_line(line) {
 	m_errmsg[0] = 0;
+	if (this == &out_of_memory) {
+		/* A special workaround for out_of_memory static init */
+		out_of_memory.m_ref = 1;
+		return;
+	}
 }
-
-Exception::Exception(const Exception& e)
-	: Object(), m_file(e.m_file), m_line(e.m_line)
-{
-	memcpy(m_errmsg, e.m_errmsg, sizeof(m_errmsg));
-}
-
 
 const char *
 Exception::type() const

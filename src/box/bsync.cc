@@ -59,13 +59,13 @@
 	assert(bsync_state.num_hosts >= bsync_state.num_connected); \
 	say_debug("[%p] %s:%d current state: nconnected=%d, bstate=%d, tstate=%d,"\
 		" leader=%d, bsync_fibers=%ld, txn_fibers=%ld, bsync_active=%ld," \
-		" txn_active=%ld, local_sign=%ld, 2state=%d", \
+		" txn_active=%ld, local_sign=%ld, gc_size=%ld", \
 	fiber(), __FUNCTION__, __LINE__, bsync_state.num_connected, \
 	bsync_state.state, txn_state.state, (int)bsync_state.leader_id, \
 	bsync_state.bsync_fibers.size, bsync_state.txn_fibers.size, \
 	bsync_state.bsync_fibers.active, bsync_state.txn_fibers.active, \
 	bsync_state.local_id < 16 ? bsync_index[bsync_state.local_id].sign : -1, \
-	bsync_index[1].state); \
+	bsync_state.region_free_size); \
 }
 
 static void* bsync_thread(void*);
@@ -275,6 +275,7 @@ static struct bsync_state_ {
 	struct slab_cache bsync_slabc;
 	struct mempool system_send_pool;
 	struct rlist region_free;
+	size_t region_free_size;
 	struct rlist region_gc;
 
 	/* TODO : temporary hack for support system operations on proxy side */
@@ -331,6 +332,7 @@ bsync_new_region()
 		return rlist_shift_entry(&bsync_state.region_free,
 			struct bsync_region, list);
 	} else {
+		++bsync_state.region_free_size;
 		struct bsync_region* region = (struct bsync_region *)
 			mempool_alloc0(&bsync_state.region_pool);
 		region_create(&region->pool, &bsync_state.txn_slabc);
@@ -466,11 +468,6 @@ static const char* bsync_mtype_name[] = {
 				say_debug("%d assert %s:%d", 445, info->__from, info->__line); \
 			assert (tmp != info); \
 		} \
-		STAILQ_FOREACH(tmp, &bsync_state.bsync_proxy_input, fifo) { \
-			if (tmp == info) \
-				say_debug("%d assert %s:%d", 450, info->__from, info->__line); \
-			assert (tmp != info); \
-		} \
 	} \
 	info->__from = __PRETTY_FUNCTION__; \
 	info->__line = __LINE__; \
@@ -489,11 +486,6 @@ static const char* bsync_mtype_name[] = {
 		STAILQ_FOREACH(tmp, &bsync_state.txn_proxy_queue, fifo) { \
 			if (tmp == info) \
 				say_debug("%d assert %s:%d", 468, (info)->__from, (info)->__line); \
-			assert (tmp != info); \
-		} \
-		STAILQ_FOREACH(tmp, &bsync_state.txn_proxy_input, fifo) { \
-			if (tmp == info) \
-				say_debug("%d assert %s:%d", 473, (info)->__from, (info)->__line); \
 			assert (tmp != info); \
 		} \
 	} \
@@ -1484,7 +1476,6 @@ bsync_queue_slave(struct bsync_operation *oper)
 static void
 bsync_proxy_slave(struct bsync_operation *oper, struct bsync_send_elem *send)
 {BSYNC_TRACE
-	oper->sign = bsync_state.iproxy_sign;
 	bsync_slave_wal(oper, send);
 	if (oper->status == bsync_op_status_fail || oper->txn_data->result < 0)
 		return;
@@ -1618,8 +1609,10 @@ bsync_check_slow(uint8_t host_id)
 	rlist_create(&BSYNC_REMOTE.send_queue);
 	BSYNC_REMOTE.op_queue_size = 0;
 	BSYNC_REMOTE.send_queue_size = 0;
-	if (BSYNC_REMOTE.state == bsync_host_connected)
+	if (BSYNC_REMOTE.state == bsync_host_connected) {
+		say_info("host %s detected as slow, disconnecting", BSYNC_REMOTE.name);
 		bsync_disconnected(host_id, false);
+	}
 }
 
 static void
@@ -1664,6 +1657,8 @@ bsync_leader_cleanup_connected(uint8_t host_id, struct bsync_operation *oper)
 static void
 bsync_leader_rollback(struct bsync_operation *oper)
 {
+	say_info("start leader rollback from %d:%ld (%ld)",
+		 oper->row->server_id, oper->row->lsn, oper->sign);
 	tt_pthread_mutex_lock(&bsync_state.mutex);
 	bsync_commit_foreach([oper](struct bsync_operation *op) {
 		if (op->sign >= oper->sign)
@@ -1702,6 +1697,14 @@ bsync_leader_rollback(struct bsync_operation *oper)
 	tt_pthread_mutex_unlock(&bsync_state.mutex);
 }
 
+#define BSYNC_SEND_2_BSYNC {\
+	bool was_empty = STAILQ_EMPTY(&bsync_state.bsync_proxy_input); \
+	STAILQ_INSERT_TAIL(&bsync_state.bsync_proxy_input, oper->txn_data, fifo); \
+	if (was_empty) \
+		ev_async_send(loop(), &bsync_process_event); \
+	fiber_yield(); \
+}
+
 static void
 bsync_queue_leader(struct bsync_operation *oper, bool proxy)
 {BSYNC_TRACE
@@ -1720,7 +1723,8 @@ bsync_queue_leader(struct bsync_operation *oper, bool proxy)
 			BSYNC_REMOTE.state < bsync_host_follow)
 		{
 			if (host_id != bsync_state.local_id) {
-				say_debug("reject operation for host %d", host_id);
+				say_debug("reject operation %d:%ld for host %d",
+					oper->row->server_id, oper->row->lsn, host_id);
 				++oper->rejected;
 				bsync_end_op(host_id, oper->common->dup_key, oper->host_id);
 			}
@@ -1745,9 +1749,11 @@ bsync_queue_leader(struct bsync_operation *oper, bool proxy)
 	oper->status = bsync_op_status_wal;
 	rlist_add_tail_entry(&bsync_state.submit_queue, oper, list);
 	oper->txn_data->result = bsync_wal_write(oper->txn_data->row);
-	if (oper->txn_data->result < 0)
+	if (oper->txn_data->result < 0) {
+		say_debug("reject operation %d:%ld for host %d",
+			oper->row->server_id, oper->row->lsn, bsync_state.local_id);
 		++oper->rejected;
-	else
+	} else
 		++oper->accepted;
 	ev_tstamp start = ev_now(loop());
 	oper->status = bsync_op_status_yield;
@@ -1841,10 +1847,16 @@ bsync_proxy_processor()
 	oper->row = oper->txn_data->row;
 	say_debug("try to proxy %d:%ld", oper->row->server_id, oper->row->lsn);
 	oper->host_id = bsync_state.iproxy_host;
+	if (bsync_state.iproxy_sign)
+		oper->sign = bsync_state.iproxy_sign;
+	bsync_state.iproxy_sign = 0;
 	bsync_state.iproxy_host = BSYNC_MAX_HOSTS;
 	bsync_state.iproxy_pos = NULL;
 	bsync_state.iproxy_end = NULL;
 	oper->owner = fiber();
+
+	BSYNC_SEND_2_BSYNC
+
 	if (bsync_state.leader_id != bsync_state.local_id)
 		bsync_proxy_slave(oper, send);
 	else
@@ -1952,13 +1964,14 @@ bsync_proxy_accept(uint8_t host_id, const char **ipos, const char *iend)
 {BSYNC_TRACE
 	assert(!rlist_empty(&bsync_state.proxy_queue));
 	assert(host_id == bsync_state.leader_id);
-	struct bsync_operation *op = rlist_shift_entry(&bsync_state.proxy_queue,
-							bsync_operation, list);
-	op->sign = mp_decode_uint(ipos);
-	say_debug("accept operation %d:%ld(%ld)", op->row->server_id,
-		  op->row->lsn, op->sign);
+	struct bsync_operation *oper = rlist_shift_entry(&bsync_state.proxy_queue,
+							 bsync_operation, list);
+	oper->sign = mp_decode_uint(ipos);
+	say_debug("accept operation %d:%ld(%ld)", oper->row->server_id,
+		  oper->row->lsn, oper->sign);
 	assert(*ipos == iend);
-	fiber_call(op->owner);
+
+	BSYNC_SEND_2_BSYNC
 }
 
 static void
@@ -2152,21 +2165,17 @@ bsync_txn_process(ev_loop * /*loop*/, ev_async */*watcher*/, int /*event*/)
 	tt_pthread_mutex_lock(&bsync_state.mutex);
 	STAILQ_CONCAT(&bsync_state.txn_proxy_input,
 		&bsync_state.txn_proxy_queue);
+	tt_pthread_mutex_unlock(&bsync_state.mutex);
 	while (!STAILQ_EMPTY(&bsync_state.txn_proxy_input)) {
 		struct bsync_txn_info *info = STAILQ_FIRST(
 			&bsync_state.txn_proxy_input);
-		tt_pthread_mutex_unlock(&bsync_state.mutex);
 		if (info->owner) {BSYNC_TRACE
-			tt_pthread_mutex_lock(&bsync_state.mutex);
 			STAILQ_REMOVE_HEAD(&bsync_state.txn_proxy_input, fifo);
-			tt_pthread_mutex_unlock(&bsync_state.mutex);
 			fiber_call(info->owner);
 		} else {BSYNC_TRACE
 			info->process(info);
 		}
-		tt_pthread_mutex_lock(&bsync_state.mutex);
 	}
-	tt_pthread_mutex_unlock(&bsync_state.mutex);
 }
 
 static void
@@ -3538,14 +3547,17 @@ bsync_outgoing(va_list ap)
 			}
 			say_info("receive from %s bsync_switch", BSYNC_REMOTE.name);
 		}
+		bool force = false;
 		while (bsync_is_out_valid(host_id))
 		{
 			if (bsync_extended_header_size(host_id, false) > 0 &&
 				rlist_empty(&BSYNC_REMOTE.send_queue) &&
-				bsync_state.state != bsync_state_shutdown)
+				bsync_state.state != bsync_state_shutdown &&
+				!force)
 			{
 				fiber_yield_timeout(bsync_state.submit_timeout);
 			}
+			force = false;
 			ev_tstamp now = ev_now(loop());
 			while (bsync_state.state == bsync_state_ready &&
 				(now - prev) < 0.001)
@@ -3557,16 +3569,25 @@ bsync_outgoing(va_list ap)
 			bsync_send(&coio, host_id);
 			prev = ev_now(loop());
 			fiber_gc();
-			if (was_empty && bsync_is_out_valid(host_id))
+			if (was_empty && bsync_is_out_valid(host_id) &&
+				rlist_empty(&BSYNC_REMOTE.send_queue))
 			{
+				if (bsync_extended_header_size(host_id, false) != 0) {
+					bsync_send_data(&BSYNC_REMOTE, &BSYNC_REMOTE.ping_msg);
+					force = true;
+					continue;
+				}
 				if (BSYNC_REMOTE.state == bsync_host_connected) {
+					BSYNC_TRACE
 					BSYNC_REMOTE.flags |= bsync_host_ping_sleep;
 					fiber_yield_timeout(bsync_state.ping_timeout);
 					BSYNC_REMOTE.flags &= ~bsync_host_ping_sleep;
 					if (BSYNC_REMOTE.send_queue_size != 0)
 						continue;
 					bsync_send_data(&BSYNC_REMOTE, &BSYNC_REMOTE.ping_msg);
+					force = true;
 				} else {
+					BSYNC_TRACE
 					BSYNC_REMOTE.flags |= bsync_host_ping_sleep;
 					fiber_yield();
 					BSYNC_REMOTE.flags &= ~bsync_host_ping_sleep;
@@ -3699,6 +3720,7 @@ bsync_init(struct recovery_state *r)
 	rlist_create(&bsync_state.execute_queue);
 	rlist_create(&bsync_state.election_ops);
 	rlist_create(&bsync_state.region_free);
+	bsync_state.region_free_size = 0;
 	rlist_create(&bsync_state.region_gc);
 	rlist_create(&txn_state.incoming_connections);
 	rlist_create(&txn_state.wait_start);

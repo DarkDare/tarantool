@@ -1775,6 +1775,10 @@ bsync_queue_leader(struct bsync_operation *oper, bool proxy)
 			bsync_leader_rollback(oper);
 	} else {
 		SWITCH_TO_TXN(oper->txn_data, txn_process);
+		if (proxy) {
+			oper->status = bsync_op_status_wal;
+			fiber_yield();
+		}
 	}
 	bsync_wait_slow(oper);
 	bsync_free_region(oper->common);
@@ -1794,7 +1798,6 @@ bsync_proxy_leader(struct bsync_operation *oper, struct bsync_send_elem *send)
 	oper->sign = oper->txn_data->sign;
 	if (oper->txn_data->result >= 0) {
 		bsync_queue_leader(oper, true);
-		fiber_yield();
 		return;
 	}
 	uint8_t host_id = oper->host_id;
@@ -2694,31 +2697,23 @@ bsync_process_loop(struct ev_loop */*loop*/, ev_async */*watcher*/, int /*event*
 		      &bsync_state.bsync_proxy_queue);
 	tt_pthread_mutex_unlock(&bsync_state.mutex);
 	struct bsync_txn_info *info = NULL;
-	tt_pthread_mutex_lock(&bsync_state.mutex);
 	while (!STAILQ_EMPTY(&bsync_state.bsync_proxy_input)) {
 		BSYNC_TRACE
 		info = STAILQ_FIRST(&bsync_state.bsync_proxy_input);
-		tt_pthread_mutex_unlock(&bsync_state.mutex);
 		if (info->op) {
 			BSYNC_TRACE
-			tt_pthread_mutex_lock(&bsync_state.mutex);
 			STAILQ_REMOVE_HEAD(&bsync_state.bsync_proxy_input, fifo);
-			tt_pthread_mutex_unlock(&bsync_state.mutex);
 			info->__from = __PRETTY_FUNCTION__;
 			info->__line = __LINE__;
 			if (bsync_state.state != bsync_state_ready) {
-				tt_pthread_mutex_lock(&bsync_state.mutex);
 				continue;
 			}
 			fiber_call(info->op->owner);
-			tt_pthread_mutex_lock(&bsync_state.mutex);
 		} else {
 			info->process(info);
 			BSYNC_TRACE
-			tt_pthread_mutex_lock(&bsync_state.mutex);
 		}
 	}
-	tt_pthread_mutex_unlock(&bsync_state.mutex);
 }
 
 /*

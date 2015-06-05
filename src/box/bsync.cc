@@ -1702,7 +1702,6 @@ bsync_leader_rollback(struct bsync_operation *oper)
 	STAILQ_INSERT_TAIL(&bsync_state.bsync_proxy_input, oper->txn_data, fifo); \
 	if (was_empty) \
 		ev_async_send(loop(), &bsync_process_event); \
-	fiber_yield(); \
 }
 
 static void
@@ -1856,6 +1855,7 @@ bsync_proxy_processor()
 	oper->owner = fiber();
 
 	BSYNC_SEND_2_BSYNC
+	fiber_yield();
 
 	if (bsync_state.leader_id != bsync_state.local_id)
 		bsync_proxy_slave(oper, send);

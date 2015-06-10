@@ -37,6 +37,7 @@ extern "C" {
 
 #include "box/replica.h"
 #include "box/recovery.h"
+#include "box/replication.h"
 #include "box/cluster.h"
 #include "main.h"
 #include "box/box.h"
@@ -51,18 +52,17 @@ lbox_info_replication(struct lua_State *L)
 	lua_newtable(L);
 
 	lua_newtable(L);
-	struct recovery_state *replica_r;
+	Relay *relay;
 	size_t i = 1;
-	rlist_foreach_entry(replica_r, &r->replica, replica) {
+	rlist_foreach_entry(relay, &r->relay, link) {
 		lua_newtable(L);
 
-		luaL_pushsockaddr(L, &replica_r->remote.addr,
-				  replica_r->remote.addr_len);
+		luaL_pushsockaddr(L, &relay->addr, relay->addr_len);
 		lua_setfield(L, -2, "peer");
 
-		lua_createtable(L, 0, vclock_size(&replica_r->vclock));
+		lua_createtable(L, 0, vclock_size(&relay->r->vclock));
 		struct vclock_iterator it;
-		vclock_iterator_init(&it, &replica_r->vclock);
+		vclock_iterator_init(&it, &relay->r->vclock);
 		vclock_foreach(&it, server) {
 			lua_pushinteger(L, server.id);
 			luaL_pushuint64(L, server.lsn);
@@ -76,7 +76,7 @@ lbox_info_replication(struct lua_State *L)
 		lua_setfield(L, -2, "status");
 
 		lua_pushstring(L, "idle");
-		lua_pushnumber(L, ev_now(loop()) - replica_r->remote.last_row_time);
+		lua_pushnumber(L, ev_now(loop()) - relay->last_row_time);
 		lua_settable(L, -3);
 
 		lua_rawseti(L, -2, i);

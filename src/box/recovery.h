@@ -105,8 +105,11 @@ struct recovery_state {
 	struct tt_uuid server_uuid;
 	uint32_t server_id;
 
-	struct rlist replica; /* replication clients */
+	struct rlist relay; /* replication clients */
 };
+
+#define recovery_foreach_relay(var, r) \
+	rlist_foreach_entry((var), &(r)->relay, link)
 
 struct recovery_state *
 recovery_new(const char *snap_dirname, const char *wal_dirname,

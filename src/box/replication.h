@@ -30,6 +30,8 @@
  */
 #include "evio.h"
 
+#include "lib/salad/rlist.h"
+
 struct xrow_header;
 
 /** State of a replication relay. */
@@ -39,8 +41,16 @@ public:
 	struct ev_io io;
 	/* Request sync */
 	uint64_t sync;
+	struct rlist link; /* list of relays in struct recovery */
 	struct recovery_state *r;
 	ev_tstamp wal_dir_rescan_delay;
+	ev_tstamp last_row_time;
+	union {
+		struct sockaddr addr;
+		struct sockaddr_storage addrstorage;
+	};
+	socklen_t addr_len;
+
 	Relay(struct recovery_state *tx_r, int fd_arg, uint64_t sync_arg);
 	~Relay();
 };

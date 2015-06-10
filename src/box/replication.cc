@@ -55,20 +55,20 @@ Relay::Relay(struct recovery_state *tx_r, int fd_arg, uint64_t sync_arg)
 	recovery_setup_panic(r, cfg_geti("panic_on_snap_error"),
 			     cfg_geti("panic_on_wal_error"));
 
-	r->remote.addr_len = sizeof(r->remote.addrstorage);
-	getpeername(fd_arg, &r->remote.addr, &r->remote.addr_len);
-	r->remote.last_row_time = ev_now(loop());
+	addr_len = sizeof(addrstorage);
+	getpeername(fd_arg, &addr, &addr_len);
+	last_row_time = ev_now(loop());
 
 	coio_init(&io);
 	io.fd = fd_arg;
 	sync = sync_arg;
 	wal_dir_rescan_delay = cfg_getd("wal_dir_rescan_delay");
-	rlist_add_tail_entry(&tx_r->replica, r, replica);
+	rlist_add_tail_entry(&tx_r->relay, this, link);
 }
 
 Relay::~Relay()
 {
-	rlist_del_entry(r, replica);
+	rlist_del_entry(this, link);
 	recovery_delete(r);
 }
 
@@ -77,7 +77,7 @@ relay_set_cord_name(Relay *relay)
 {
 	char name[FIBER_NAME_MAX];
 	snprintf(name, sizeof(name), "relay/%s",
-		 sio_strfaddr(&relay->r->remote.addr, relay->r->remote.addr_len));
+		 sio_strfaddr(&relay->addr, relay->addr_len));
 	cord_set_name(name);
 }
 
@@ -258,5 +258,5 @@ replication_send_row(struct recovery_state *r, void *param,
 	 */
 	vclock_follow(&r->vclock, packet->server_id, packet->lsn);
 
-	r->remote.last_row_time = ev_now(loop());
+	relay->last_row_time = ev_now(loop());
 }

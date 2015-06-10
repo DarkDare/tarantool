@@ -24,7 +24,7 @@ string.match(box.info.pid, '^[1-9][0-9]*$') ~= nil
 ---
 - false
 ...
-box.info.replication.source[1].status
+box.info.replication.status
 ---
 - off
 ...
@@ -51,7 +51,8 @@ table.sort(t)
 ...
 t
 ---
-- - pid
+- - cluster
+  - pid
   - replication
   - server
   - snapshot_pid

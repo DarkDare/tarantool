@@ -44,72 +44,102 @@ extern "C" {
 #include "lua/utils.h"
 #include "fiber.h"
 
+static void
+lbox_pushrelay(struct lua_State *L, Relay *relay)
+{
+	lua_newtable(L);
+
+	lua_pushliteral(L, "connected");
+	lua_setfield(L, -2, "status");
+
+	lua_pushliteral(L, "downstream");
+	lua_setfield(L, -2, "type");
+
+	luaL_pushsockaddr(L, &relay->addr, relay->addr_len);
+	lua_setfield(L, -2, "peer");
+
+	lua_createtable(L, 0, vclock_size(&relay->r->vclock));
+	struct vclock_iterator it;
+	vclock_iterator_init(&it, &relay->r->vclock);
+	vclock_foreach(&it, server) {
+		lua_pushinteger(L, server.id);
+		luaL_pushuint64(L, server.lsn);
+		lua_settable(L, -3);
+	}
+	/* Request compact output flow */
+	luaL_setmaphint(L, -1);
+	lua_setfield(L, -2, "vclock");
+
+	lua_pushstring(L, "idle");
+	lua_pushnumber(L, ev_now(loop()) - relay->last_row_time);
+	lua_settable(L, -3);
+}
+
+static void
+lbox_pushremote(struct lua_State *L, struct remote *remote)
+{
+	lua_newtable(L);
+
+	lua_pushstring(L, remote->status);
+	lua_setfield(L, -2, "status");
+
+	lua_pushliteral(L, "upstream");
+	lua_setfield(L, -2, "type");
+
+	if (remote->reader == NULL)
+		return;
+
+	luaL_pushsockaddr(L, &remote->addr, remote->addr_len);
+	lua_setfield(L, -2, "peer");
+
+	lua_pushstring(L, "lag");
+	lua_pushnumber(L, remote->lag);
+	lua_settable(L, -3);
+
+	lua_pushstring(L, "idle");
+	lua_pushnumber(L, ev_now(loop()) - remote->last_row_time);
+	lua_settable(L, -3);
+
+	if (remote->reader->exception) {
+		lua_pushstring(L, "message");
+		lua_pushstring(L, remote->reader->exception->errmsg());
+		lua_settable(L, -3);
+	}
+}
+
 static int
 lbox_info_replication(struct lua_State *L)
+{
+	/* Old backward-compatible format */
+
+	struct recovery_state *r = recovery;
+	lbox_pushremote(L, &r->remote);
+	lua_pushnil(L);
+	lua_setfield(L, -2, "type"); /* hide box.info.replication.type */
+
+	return 1;
+}
+
+static int
+lbox_info_cluster(struct lua_State *L)
 {
 	struct recovery_state *r = recovery;
 
 	lua_newtable(L);
 
-	lua_newtable(L);
+	/* Downstreams */
 	Relay *relay;
-	size_t i = 1;
-	rlist_foreach_entry(relay, &r->relay, link) {
-		lua_newtable(L);
-
-		luaL_pushsockaddr(L, &relay->addr, relay->addr_len);
-		lua_setfield(L, -2, "peer");
-
-		lua_createtable(L, 0, vclock_size(&relay->r->vclock));
-		struct vclock_iterator it;
-		vclock_iterator_init(&it, &relay->r->vclock);
-		vclock_foreach(&it, server) {
-			lua_pushinteger(L, server.id);
-			luaL_pushuint64(L, server.lsn);
-			lua_settable(L, -3);
-		}
-		/* Request compact output flow */
-		luaL_setmaphint(L, -1);
-		lua_setfield(L, -2, "vclock");
-
-		lua_pushliteral(L, "connected");
-		lua_setfield(L, -2, "status");
-
-		lua_pushstring(L, "idle");
-		lua_pushnumber(L, ev_now(loop()) - relay->last_row_time);
-		lua_settable(L, -3);
-
-		lua_rawseti(L, -2, i);
-	}
-	lua_setfield(L, -2, "replica");
-
-	lua_newtable(L);
-	lua_newtable(L);
-	luaL_pushsockaddr(L, &r->remote.addr, r->remote.addr_len);
-	lua_setfield(L, -2, "peer");
-
-	lua_pushstring(L, r->remote.status);
-	lua_setfield(L, -2, "status");
-
-	if (r->remote.reader) {
-		lua_pushstring(L, "lag");
-		lua_pushnumber(L, r->remote.lag);
-		lua_settable(L, -3);
-
-		lua_pushstring(L, "idle");
-		lua_pushnumber(L, ev_now(loop()) - r->remote.last_row_time);
-		lua_settable(L, -3);
-
-		if (r->remote.reader->exception) {
-			lua_pushstring(L, "message");
-			lua_pushstring(L,
-				       r->remote.reader->exception->errmsg());
-			lua_settable(L, -3);
-		}
+	recovery_foreach_relay(r, relay) {
+		lbox_pushrelay(L, relay);
+		const char *key = sio_strfaddr(&relay->addr, relay->addr_len);
+		lua_setfield(L, -2, key);
 	}
 
-	lua_rawseti(L, -2, 1); /* source #1 */
-	lua_setfield(L, -2, "source");
+	/* Upstreams */
+	if (recovery_has_remote(r)) {
+		lbox_pushremote(L, &r->remote);
+		lua_setfield(L, -2, r->remote.source);
+	}
 
 	return 1;
 }
@@ -210,6 +240,7 @@ lbox_info_dynamic_meta [] =
 	{"vclock", lbox_info_vclock},
 	{"server", lbox_info_server},
 	{"replication", lbox_info_replication},
+	{"cluster", lbox_info_cluster},
 	{"status", lbox_info_status},
 	{"uptime", lbox_info_uptime},
 	{"snapshot_pid", lbox_info_snapshot_pid},

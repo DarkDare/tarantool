@@ -10,25 +10,16 @@ while box.info.server.id == 0 do require('fiber').sleep(0.01) end
 while box.space['_priv']:len() < 1 do require('fiber').sleep(0.01) end
 ---
 ...
-box.info.replication.replica
+key, info = next(box.info.cluster); return info
 ---
-- - peer:
-      host: <host>
-      family: <family>
-      port: <port>
-    idle: <idle>
-    vclock: {1: 4}
-    status: connected
-...
-box.info.replication.source
----
-- - peer:
-      host: <host>
-      family: <family>
-      port: <port>
-    idle: <idle>
-    status: connected
-    lag: <lag>
+- peer:
+    host: <host>
+    family: <family>
+    port: <port>
+  status: connected
+  idle: <idle>
+  vclock: {1: 4}
+  type: downstream
 ...
 s = box.schema.space.create('memtx', { engine = 'memtx'})
 ---
@@ -117,7 +108,7 @@ box.info.vclock
 ---
 - {2: 0, 1: 20}
 ...
-box.info.replication.replica[1].vclock
+key, info = next(box.info.cluster); return info.vclock
 ---
 - {1: 20}
 ...
@@ -418,7 +409,7 @@ box.info.vclock
 ---
 - {2: 20, 1: 40}
 ...
-box.info.replication.replica[1].vclock
+key, info = next(box.info.cluster); return info.vclock
 ---
 - {2: 20, 1: 40}
 ...
@@ -719,7 +710,7 @@ box.info.vclock
 ---
 - {2: 40, 1: 60}
 ...
-box.info.replication.replica[1].vclock
+key, info = next(box.info.cluster); return info.vclock
 ---
 - {2: 40, 1: 60}
 ...
@@ -1020,7 +1011,7 @@ box.info.vclock
 ---
 - {2: 60, 1: 80}
 ...
-box.info.replication.replica[1].vclock
+key, info = next(box.info.cluster); return info.vclock
 ---
 - {2: 60, 1: 80}
 ...
@@ -1321,7 +1312,7 @@ box.info.vclock
 ---
 - {2: 80, 1: 100}
 ...
-box.info.replication.replica[1].vclock
+key, info = next(box.info.cluster); return info.vclock
 ---
 - {2: 80, 1: 100}
 ...
@@ -1622,7 +1613,7 @@ box.info.vclock
 ---
 - {2: 100, 1: 120}
 ...
-box.info.replication.replica[1].vclock
+key, info = next(box.info.cluster); return info.vclock
 ---
 - {2: 100, 1: 120}
 ...
@@ -1923,7 +1914,7 @@ box.info.vclock
 ---
 - {2: 120, 1: 140}
 ...
-box.info.replication.replica[1].vclock
+key, info = next(box.info.cluster); return info.vclock
 ---
 - {2: 120, 1: 140}
 ...
@@ -2224,7 +2215,7 @@ box.info.vclock
 ---
 - {2: 140, 1: 160}
 ...
-box.info.replication.replica[1].vclock
+key, info = next(box.info.cluster); return info.vclock
 ---
 - {2: 140, 1: 160}
 ...
@@ -2525,7 +2516,7 @@ box.info.vclock
 ---
 - {2: 160, 1: 180}
 ...
-box.info.replication.replica[1].vclock
+key, info = next(box.info.cluster); return info.vclock
 ---
 - {2: 160, 1: 180}
 ...
@@ -2826,7 +2817,7 @@ box.info.vclock
 ---
 - {2: 180, 1: 200}
 ...
-box.info.replication.replica[1].vclock
+key, info = next(box.info.cluster); return info.vclock
 ---
 - {2: 180, 1: 200}
 ...
@@ -3127,7 +3118,7 @@ box.info.vclock
 ---
 - {2: 200, 1: 220}
 ...
-box.info.replication.replica[1].vclock
+key, info = next(box.info.cluster); return info.vclock
 ---
 - {2: 200, 1: 220}
 ...
@@ -3428,7 +3419,7 @@ box.info.vclock
 ---
 - {2: 220, 1: 240}
 ...
-box.info.replication.replica[1].vclock
+key, info = next(box.info.cluster); return info.vclock
 ---
 - {2: 220, 1: 240}
 ...
@@ -3729,7 +3720,7 @@ box.info.vclock
 ---
 - {2: 240, 1: 260}
 ...
-box.info.replication.replica[1].vclock
+key, info = next(box.info.cluster); return info.vclock
 ---
 - {2: 240, 1: 260}
 ...
@@ -4030,7 +4021,7 @@ box.info.vclock
 ---
 - {2: 260, 1: 280}
 ...
-box.info.replication.replica[1].vclock
+key, info = next(box.info.cluster); return info.vclock
 ---
 - {2: 260, 1: 280}
 ...
@@ -4331,7 +4322,7 @@ box.info.vclock
 ---
 - {2: 280, 1: 300}
 ...
-box.info.replication.replica[1].vclock
+key, info = next(box.info.cluster); return info.vclock
 ---
 - {2: 280, 1: 300}
 ...
@@ -4632,7 +4623,7 @@ box.info.vclock
 ---
 - {2: 300, 1: 320}
 ...
-box.info.replication.replica[1].vclock
+key, info = next(box.info.cluster); return info.vclock
 ---
 - {2: 300, 1: 320}
 ...
@@ -4933,7 +4924,7 @@ box.info.vclock
 ---
 - {2: 320, 1: 340}
 ...
-box.info.replication.replica[1].vclock
+key, info = next(box.info.cluster); return info.vclock
 ---
 - {2: 320, 1: 340}
 ...
@@ -5234,7 +5225,7 @@ box.info.vclock
 ---
 - {2: 340, 1: 360}
 ...
-box.info.replication.replica[1].vclock
+key, info = next(box.info.cluster); return info.vclock
 ---
 - {2: 340, 1: 360}
 ...
@@ -5535,7 +5526,7 @@ box.info.vclock
 ---
 - {2: 360, 1: 380}
 ...
-box.info.replication.replica[1].vclock
+key, info = next(box.info.cluster); return info.vclock
 ---
 - {2: 360, 1: 380}
 ...
@@ -5836,7 +5827,7 @@ box.info.vclock
 ---
 - {2: 380, 1: 400}
 ...
-box.info.replication.replica[1].vclock
+key, info = next(box.info.cluster); return info.vclock
 ---
 - {2: 380, 1: 400}
 ...

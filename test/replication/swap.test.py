@@ -57,8 +57,7 @@ replica.uri = '%s:%s@%s' % (LOGIN, PASSWORD, replica.iproto.uri)
 replica.admin("while box.space['_priv']:len() < 1 do require('fiber').sleep(0.01) end")
 replica.iproto.py_con.authenticate(LOGIN, PASSWORD)
 
-master.admin("box.info.replication.replica")
-replica.admin("box.info.replication.source")
+master.admin("key, info = next(box.info.cluster); return info")
 
 for engine in engines:
     master.admin("s = box.schema.space.create('%s', { engine = '%s'})" % (engine, engine))
@@ -84,7 +83,7 @@ for i in range(REPEAT):
     replica.wait_lsn(master_id, master.get_lsn(master_id))
     select_tuples(replica, id, id + ID_STEP)
     master.admin("box.info.vclock")
-    master.admin("box.info.replication.replica[1].vclock")
+    master.admin("key, info = next(box.info.cluster); return info.vclock")
     id += ID_STEP
 
     # insert to master

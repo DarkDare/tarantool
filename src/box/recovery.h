@@ -108,7 +108,7 @@ struct recovery_state {
 	struct rlist relay; /* replication clients */
 };
 
-#define recovery_foreach_relay(var, r) \
+#define recovery_foreach_relay(r, var) \
 	rlist_foreach_entry((var), &(r)->relay, link)
 
 struct recovery_state *

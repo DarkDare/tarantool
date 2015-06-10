@@ -41,12 +41,13 @@ public:
 	uint64_t sync;
 	struct recovery_state *r;
 	ev_tstamp wal_dir_rescan_delay;
-	Relay(int fd_arg, uint64_t sync_arg);
+	Relay(struct recovery_state *tx_r, int fd_arg, uint64_t sync_arg);
 	~Relay();
 };
 
 void
-replication_join(int fd, struct xrow_header *packet,
+replication_join(struct recovery_state *tx_r, int fd,
+		 struct xrow_header *packet,
 		 void (*on_join)(const struct tt_uuid *));
 
 /**
@@ -55,7 +56,8 @@ replication_join(int fd, struct xrow_header *packet,
  * @return None. On error, closes the socket.
  */
 void
-replication_subscribe(int fd, struct xrow_header *packet);
+replication_subscribe(struct recovery_state *tx_r, int fd,
+		      struct xrow_header *packet);
 
 void
 relay_send(Relay *relay, struct xrow_header *packet);

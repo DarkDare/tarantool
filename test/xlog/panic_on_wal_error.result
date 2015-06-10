@@ -124,14 +124,17 @@ box.cfg.panic_on_wal_error
 fiber = require('fiber')
 ---
 ...
-while box.info.replication.status ~= "stopped" do fiber.sleep(0.001) end
+key = next(box.info.replication.source)
 ---
 ...
-box.info.replication.status
+while box.info.replication.source[key].status ~= "stopped" do fiber.sleep(0.001) end
+---
+...
+box.info.replication.source[key].status
 ---
 - stopped
 ...
-box.info.replication.message
+box.info.replication.source[key].message
 ---
 - 'Missing .xlog file between LSN 6 {1: 6, 2: 0} and 8 {1: 8, 2: 0}'
 ...

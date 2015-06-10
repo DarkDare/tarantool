@@ -3,6 +3,7 @@ import tarantool
 from lib.tarantool_server import TarantoolServer
 import re
 import yaml
+import sys
 
 REPEAT = 20
 ID_BEGIN = 0
@@ -28,6 +29,12 @@ def select_tuples(_server, begin, end):
             space = _server.iproto.py_con.space(engine)
             print space.select(i)
 
+sys.stdout.push_filter('host: .*', 'host: <host>')
+sys.stdout.push_filter('family: .*', 'family: <family>')
+sys.stdout.push_filter('port: .*', 'port: <port>')
+sys.stdout.push_filter('idle: [0-9\.]+', 'idle: <idle>')
+sys.stdout.push_filter('lag: [0-9\.]+', 'lag: <lag>')
+
 # master server
 master = server
 # Re-deploy server to cleanup Sophia data
@@ -49,6 +56,9 @@ replica.admin("while box.info.server.id == 0 do require('fiber').sleep(0.01) end
 replica.uri = '%s:%s@%s' % (LOGIN, PASSWORD, replica.iproto.uri)
 replica.admin("while box.space['_priv']:len() < 1 do require('fiber').sleep(0.01) end")
 replica.iproto.py_con.authenticate(LOGIN, PASSWORD)
+
+master.admin("box.info.replication.replica")
+replica.admin("box.info.replication.source")
 
 for engine in engines:
     master.admin("s = box.schema.space.create('%s', { engine = '%s'})" % (engine, engine))
@@ -73,6 +83,8 @@ for i in range(REPEAT):
     # select from replica
     replica.wait_lsn(master_id, master.get_lsn(master_id))
     select_tuples(replica, id, id + ID_STEP)
+    master.admin("box.info.vclock")
+    master.admin("box.info.replication.replica[1].vclock")
     id += ID_STEP
 
     # insert to master
@@ -122,3 +134,5 @@ replica.stop()
 replica.cleanup(True)
 server.stop()
 server.deploy()
+
+sys.stdout.pop_filter()

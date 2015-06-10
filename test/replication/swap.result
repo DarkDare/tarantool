@@ -10,6 +10,26 @@ while box.info.server.id == 0 do require('fiber').sleep(0.01) end
 while box.space['_priv']:len() < 1 do require('fiber').sleep(0.01) end
 ---
 ...
+box.info.replication.replica
+---
+- - peer:
+      host: <host>
+      family: <family>
+      port: <port>
+    idle: <idle>
+    vclock: {1: 4}
+    status: connected
+...
+box.info.replication.source
+---
+- - peer:
+      host: <host>
+      family: <family>
+      port: <port>
+    idle: <idle>
+    status: connected
+    lag: <lag>
+...
 s = box.schema.space.create('memtx', { engine = 'memtx'})
 ---
 ...
@@ -93,6 +113,14 @@ box.space.sophia:select{4}
 -
 - [4, tuple 4]
 
+box.info.vclock
+---
+- {2: 0, 1: 20}
+...
+box.info.replication.replica[1].vclock
+---
+- {1: 20}
+...
 box.space.memtx:insert{5, "tuple 5"}
 -
 None
@@ -386,6 +414,14 @@ box.space.sophia:select{24}
 -
 - [24, tuple 24]
 
+box.info.vclock
+---
+- {2: 20, 1: 40}
+...
+box.info.replication.replica[1].vclock
+---
+- {2: 20, 1: 40}
+...
 box.space.memtx:insert{25, "tuple 25"}
 -
 None
@@ -679,6 +715,14 @@ box.space.sophia:select{44}
 -
 - [44, tuple 44]
 
+box.info.vclock
+---
+- {2: 40, 1: 60}
+...
+box.info.replication.replica[1].vclock
+---
+- {2: 40, 1: 60}
+...
 box.space.memtx:insert{45, "tuple 45"}
 -
 None
@@ -972,6 +1016,14 @@ box.space.sophia:select{64}
 -
 - [64, tuple 64]
 
+box.info.vclock
+---
+- {2: 60, 1: 80}
+...
+box.info.replication.replica[1].vclock
+---
+- {2: 60, 1: 80}
+...
 box.space.memtx:insert{65, "tuple 65"}
 -
 None
@@ -1265,6 +1317,14 @@ box.space.sophia:select{84}
 -
 - [84, tuple 84]
 
+box.info.vclock
+---
+- {2: 80, 1: 100}
+...
+box.info.replication.replica[1].vclock
+---
+- {2: 80, 1: 100}
+...
 box.space.memtx:insert{85, "tuple 85"}
 -
 None
@@ -1558,6 +1618,14 @@ box.space.sophia:select{104}
 -
 - [104, tuple 104]
 
+box.info.vclock
+---
+- {2: 100, 1: 120}
+...
+box.info.replication.replica[1].vclock
+---
+- {2: 100, 1: 120}
+...
 box.space.memtx:insert{105, "tuple 105"}
 -
 None
@@ -1851,6 +1919,14 @@ box.space.sophia:select{124}
 -
 - [124, tuple 124]
 
+box.info.vclock
+---
+- {2: 120, 1: 140}
+...
+box.info.replication.replica[1].vclock
+---
+- {2: 120, 1: 140}
+...
 box.space.memtx:insert{125, "tuple 125"}
 -
 None
@@ -2144,6 +2220,14 @@ box.space.sophia:select{144}
 -
 - [144, tuple 144]
 
+box.info.vclock
+---
+- {2: 140, 1: 160}
+...
+box.info.replication.replica[1].vclock
+---
+- {2: 140, 1: 160}
+...
 box.space.memtx:insert{145, "tuple 145"}
 -
 None
@@ -2437,6 +2521,14 @@ box.space.sophia:select{164}
 -
 - [164, tuple 164]
 
+box.info.vclock
+---
+- {2: 160, 1: 180}
+...
+box.info.replication.replica[1].vclock
+---
+- {2: 160, 1: 180}
+...
 box.space.memtx:insert{165, "tuple 165"}
 -
 None
@@ -2730,6 +2822,14 @@ box.space.sophia:select{184}
 -
 - [184, tuple 184]
 
+box.info.vclock
+---
+- {2: 180, 1: 200}
+...
+box.info.replication.replica[1].vclock
+---
+- {2: 180, 1: 200}
+...
 box.space.memtx:insert{185, "tuple 185"}
 -
 None
@@ -3023,6 +3123,14 @@ box.space.sophia:select{204}
 -
 - [204, tuple 204]
 
+box.info.vclock
+---
+- {2: 200, 1: 220}
+...
+box.info.replication.replica[1].vclock
+---
+- {2: 200, 1: 220}
+...
 box.space.memtx:insert{205, "tuple 205"}
 -
 None
@@ -3316,6 +3424,14 @@ box.space.sophia:select{224}
 -
 - [224, tuple 224]
 
+box.info.vclock
+---
+- {2: 220, 1: 240}
+...
+box.info.replication.replica[1].vclock
+---
+- {2: 220, 1: 240}
+...
 box.space.memtx:insert{225, "tuple 225"}
 -
 None
@@ -3609,6 +3725,14 @@ box.space.sophia:select{244}
 -
 - [244, tuple 244]
 
+box.info.vclock
+---
+- {2: 240, 1: 260}
+...
+box.info.replication.replica[1].vclock
+---
+- {2: 240, 1: 260}
+...
 box.space.memtx:insert{245, "tuple 245"}
 -
 None
@@ -3902,6 +4026,14 @@ box.space.sophia:select{264}
 -
 - [264, tuple 264]
 
+box.info.vclock
+---
+- {2: 260, 1: 280}
+...
+box.info.replication.replica[1].vclock
+---
+- {2: 260, 1: 280}
+...
 box.space.memtx:insert{265, "tuple 265"}
 -
 None
@@ -4195,6 +4327,14 @@ box.space.sophia:select{284}
 -
 - [284, tuple 284]
 
+box.info.vclock
+---
+- {2: 280, 1: 300}
+...
+box.info.replication.replica[1].vclock
+---
+- {2: 280, 1: 300}
+...
 box.space.memtx:insert{285, "tuple 285"}
 -
 None
@@ -4488,6 +4628,14 @@ box.space.sophia:select{304}
 -
 - [304, tuple 304]
 
+box.info.vclock
+---
+- {2: 300, 1: 320}
+...
+box.info.replication.replica[1].vclock
+---
+- {2: 300, 1: 320}
+...
 box.space.memtx:insert{305, "tuple 305"}
 -
 None
@@ -4781,6 +4929,14 @@ box.space.sophia:select{324}
 -
 - [324, tuple 324]
 
+box.info.vclock
+---
+- {2: 320, 1: 340}
+...
+box.info.replication.replica[1].vclock
+---
+- {2: 320, 1: 340}
+...
 box.space.memtx:insert{325, "tuple 325"}
 -
 None
@@ -5074,6 +5230,14 @@ box.space.sophia:select{344}
 -
 - [344, tuple 344]
 
+box.info.vclock
+---
+- {2: 340, 1: 360}
+...
+box.info.replication.replica[1].vclock
+---
+- {2: 340, 1: 360}
+...
 box.space.memtx:insert{345, "tuple 345"}
 -
 None
@@ -5367,6 +5531,14 @@ box.space.sophia:select{364}
 -
 - [364, tuple 364]
 
+box.info.vclock
+---
+- {2: 360, 1: 380}
+...
+box.info.replication.replica[1].vclock
+---
+- {2: 360, 1: 380}
+...
 box.space.memtx:insert{365, "tuple 365"}
 -
 None
@@ -5660,6 +5832,14 @@ box.space.sophia:select{384}
 -
 - [384, tuple 384]
 
+box.info.vclock
+---
+- {2: 380, 1: 400}
+...
+box.info.replication.replica[1].vclock
+---
+- {2: 380, 1: 400}
+...
 box.space.memtx:insert{385, "tuple 385"}
 -
 None

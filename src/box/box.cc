@@ -332,7 +332,7 @@ box_process_join(int fd, struct xrow_header *header)
 	assert(header->type == IPROTO_JOIN);
 
 	/* Process JOIN request via replication relay */
-	replication_join(fd, header, box_on_cluster_join);
+	replication_join(recovery, fd, header, box_on_cluster_join);
 }
 
 void
@@ -342,7 +342,7 @@ box_process_subscribe(int fd, struct xrow_header *header)
 	access_check_universe(PRIV_R);
 
 	/* process SUBSCRIBE request via replication relay */
-	replication_subscribe(fd, header);
+	replication_subscribe(recovery, fd, header);
 }
 
 /** Replace the current server id in _cluster */

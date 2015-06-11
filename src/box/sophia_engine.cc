@@ -451,7 +451,7 @@ SophiaEngine::commit(struct txn *txn)
 void
 SophiaEngine::rollbackStatement(struct txn_stmt *)
 {
-	panic("not implemented");
+	say_info("SophiaEngine::rollbackStatement()");
 }
 
 void

@@ -2,7 +2,7 @@
 --# push filter 'admin: .*' to 'admin: <uri>'
 box.cfg.nosuchoption = 1
 ---
-- error: '[string "-- load_cfg.lua - internal file..."]:267: Attempt to modify a read-only
+- error: '[string "-- load_cfg.lua - internal file..."]:269: Attempt to modify a read-only
     table'
 ...
 t = {} for k,v in pairs(box.cfg) do if type(v) ~= 'table' and type(v) ~= 'function' then table.insert(t, k..': '..tostring(v)) end end
@@ -13,13 +13,14 @@ t
 - - 'snapshot_count: 6'
   - 'too_long_threshold: 0.5'
   - 'slab_alloc_factor: 1.1'
-  - 'slab_alloc_maximal: 1048576'
+  - 'rows_per_wal: 50'
   - 'background: false'
   - 'slab_alloc_arena: 0.1'
   - 'primary: <uri>
   - 'logger_nonblock: true'
   - 'snap_dir: .'
   - 'coredump: false'
+  - 'slab_alloc_maximal: 1048576'
   - 'slab_alloc_minimal: 16'
   - 'sophia_dir: .'
   - 'wal_mode: write'
@@ -27,16 +28,16 @@ t
   - 'panic_on_snap_error: true'
   - 'panic_on_wal_error: true'
   - 'log_level: 5'
+  - 'iproto_fiber_max: 1024'
   - 'readahead: 16320'
-  - 'pid_file: tarantool.pid'
-  - 'rows_per_wal: 50'
   - 'snapshot_period: 0'
+  - 'pid_file: tarantool.pid'
   - 'wal_dir_rescan_delay: 2'
 ...
 -- must be read-only
 box.cfg()
 ---
-- error: '[string "-- load_cfg.lua - internal file..."]:213: bad argument #1 to ''pairs''
+- error: '[string "-- load_cfg.lua - internal file..."]:215: bad argument #1 to ''pairs''
     (table expected, got nil)'
 ...
 t = {} for k,v in pairs(box.cfg) do if type(v) ~= 'table' and type(v) ~= 'function' then table.insert(t, k..': '..tostring(v)) end end
@@ -47,13 +48,14 @@ t
 - - 'snapshot_count: 6'
   - 'too_long_threshold: 0.5'
   - 'slab_alloc_factor: 1.1'
-  - 'slab_alloc_maximal: 1048576'
+  - 'rows_per_wal: 50'
   - 'background: false'
   - 'slab_alloc_arena: 0.1'
   - 'primary: <uri>
   - 'logger_nonblock: true'
   - 'snap_dir: .'
   - 'coredump: false'
+  - 'slab_alloc_maximal: 1048576'
   - 'slab_alloc_minimal: 16'
   - 'sophia_dir: .'
   - 'wal_mode: write'
@@ -61,32 +63,32 @@ t
   - 'panic_on_snap_error: true'
   - 'panic_on_wal_error: true'
   - 'log_level: 5'
+  - 'iproto_fiber_max: 1024'
   - 'readahead: 16320'
-  - 'pid_file: tarantool.pid'
-  - 'rows_per_wal: 50'
   - 'snapshot_period: 0'
+  - 'pid_file: tarantool.pid'
   - 'wal_dir_rescan_delay: 2'
 ...
 -- check that cfg with unexpected parameter fails.
 box.cfg{sherlock = 'holmes'}
 ---
-- error: '[string "-- load_cfg.lua - internal file..."]:169: Error: cfg parameter
+- error: '[string "-- load_cfg.lua - internal file..."]:171: Error: cfg parameter
     ''sherlock'' is unexpected'
 ...
 -- check that cfg with unexpected type of parameter failes
 box.cfg{listen = {}}
 ---
-- error: '[string "-- load_cfg.lua - internal file..."]:189: Error: cfg parameter
+- error: '[string "-- load_cfg.lua - internal file..."]:191: Error: cfg parameter
     ''listen'' should be one of types: string, number'
 ...
 box.cfg{wal_dir = 0}
 ---
-- error: '[string "-- load_cfg.lua - internal file..."]:183: Error: cfg parameter
+- error: '[string "-- load_cfg.lua - internal file..."]:185: Error: cfg parameter
     ''wal_dir'' should be of type string'
 ...
 box.cfg{coredump = 'true'}
 ---
-- error: '[string "-- load_cfg.lua - internal file..."]:183: Error: cfg parameter
+- error: '[string "-- load_cfg.lua - internal file..."]:185: Error: cfg parameter
     ''coredump'' should be of type boolean'
 ...
 --------------------------------------------------------------------------------
@@ -94,17 +96,17 @@ box.cfg{coredump = 'true'}
 --------------------------------------------------------------------------------
 box.cfg{slab_alloc_arena = "100500"}
 ---
-- error: '[string "-- load_cfg.lua - internal file..."]:183: Error: cfg parameter
+- error: '[string "-- load_cfg.lua - internal file..."]:185: Error: cfg parameter
     ''slab_alloc_arena'' should be of type number'
 ...
 box.cfg{sophia = "sophia"}
 ---
-- error: '[string "-- load_cfg.lua - internal file..."]:177: Error: cfg parameter
+- error: '[string "-- load_cfg.lua - internal file..."]:179: Error: cfg parameter
     ''sophia'' should be a table'
 ...
 box.cfg{sophia = {threads = "threads"}}
 ---
-- error: '[string "-- load_cfg.lua - internal file..."]:183: Error: cfg parameter
+- error: '[string "-- load_cfg.lua - internal file..."]:185: Error: cfg parameter
     ''sophia.threads'' should be of type number'
 ...
 --------------------------------------------------------------------------------

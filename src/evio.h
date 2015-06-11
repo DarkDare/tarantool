@@ -80,6 +80,13 @@ struct evio_service
 	 */
 	void (*on_bind)(void *);
 	void *on_bind_param;
+
+	/**
+	 * A callback invoked on client connect.
+	 */
+	int (*on_connect)(struct evio_service *);
+	void *on_connect_param;
+
 	/**
 	 * A callback invoked on every accepted client socket.
 	 * It's OK to throw an exception in the callback:
@@ -101,6 +108,8 @@ struct evio_service
 void
 evio_service_init(ev_loop *loop,
 		  struct evio_service *service, const char *name,
+		  int (*on_connect)(struct evio_service *),
+		  void *on_conect_param,
 		  void (*on_accept)(struct evio_service *,
 				    int, struct sockaddr *, socklen_t),
 		  void *on_accept_param);

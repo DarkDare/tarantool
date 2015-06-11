@@ -152,9 +152,8 @@ static void
 sophia_async_schedule(ev_loop *loop, struct ev_async *w, int /* events */)
 {
 	SophiaEngine *engine = (SophiaEngine *)w->data;
-	sophia_poll(engine);
-	if (sophia_queue(engine))
-		ev_idle_start(loop, &engine->idle);
+	while (sophia_poll(engine));
+	ev_idle_start(loop, &engine->idle);
 }
 
 void

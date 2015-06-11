@@ -21,7 +21,7 @@ box.cfg
 - snapshot_count: 6
   too_long_threshold: 0.5
   slab_alloc_factor: 1.1
-  slab_alloc_maximal: 1048576
+  rows_per_wal: 50
   background: false
   slab_alloc_arena: 0.1
   sophia:
@@ -35,6 +35,7 @@ box.cfg
   logger_nonblock: true
   snap_dir: .
   coredump: false
+  slab_alloc_maximal: 1048576
   slab_alloc_minimal: 16
   sophia_dir: .
   wal_mode: write
@@ -42,10 +43,10 @@ box.cfg
   panic_on_snap_error: true
   panic_on_wal_error: true
   log_level: 5
+  iproto_fiber_max: 1024
   readahead: 16320
-  pid_file: tarantool.pid
-  rows_per_wal: 50
   snapshot_period: 0
+  pid_file: tarantool.pid
   wal_dir_rescan_delay: 2
 ...
 space:insert{1, 'tuple'}

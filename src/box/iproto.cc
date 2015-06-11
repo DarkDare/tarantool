@@ -33,6 +33,7 @@
 #include <stdio.h>
 
 #include "iproto_port.h"
+#include "cfg.h"
 #include "main.h"
 #include "fiber.h"
 #include "say.h"
@@ -126,6 +127,8 @@ struct iproto_queue
 	 * in this queue.
 	 */
 	struct rlist fiber_cache;
+	int fiber_count;
+	int fiber_limit;
 	/**
 	 * Used to trigger request processing when
 	 * the queue becomes non-empty.
@@ -202,6 +205,7 @@ restart:
 	}
 	/** Put the current fiber into a queue fiber cache. */
 	rlist_add_entry(&i_queue->fiber_cache, fiber(), state);
+	i_queue->fiber_count--;
 	fiber_yield();
 	goto restart;
 }
@@ -220,6 +224,7 @@ iproto_queue_schedule(ev_loop * /* loop */, struct ev_async *watcher,
 					      struct fiber, state);
 		else
 			f = fiber_new("iproto", iproto_queue_handler);
+		i_queue->fiber_count++;
 		fiber_start(f, i_queue);
 	}
 }
@@ -236,6 +241,8 @@ iproto_queue_init(struct iproto_queue *i_queue)
 	ev_async_init(&i_queue->watcher, iproto_queue_schedule);
 	i_queue->watcher.data = i_queue;
 	rlist_create(&i_queue->fiber_cache);
+	i_queue->fiber_count = 0;
+	i_queue->fiber_limit = cfg_geti("iproto_fiber_max");
 }
 
 /* }}} */
@@ -821,6 +828,12 @@ iproto_on_accept(struct evio_service * /* service */, int fd,
 	iproto_queue_push(&request_queue, ireq);
 }
 
+static int
+iproto_on_connect(struct evio_service *)
+{
+	return request_queue.fiber_count <= request_queue.fiber_limit;
+}
+
 /** Initialize a read-write port. */
 void
 iproto_init(struct evio_service *service)
@@ -832,7 +845,7 @@ iproto_init(struct evio_service *service)
 		       sizeof(struct iproto_connection));
 
 	evio_service_init(loop(), service, "binary",
-			  iproto_on_accept, NULL);
+			  iproto_on_connect, NULL, iproto_on_accept, NULL);
 }
 
 /* vim: set foldmethod=marker */

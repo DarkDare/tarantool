@@ -149,18 +149,10 @@ evio_service_name(struct evio_service *service)
 	return service->name;
 }
 
-/**
- * A callback invoked by libev when acceptor socket is ready.
- * Accept the socket, initialize it and pass to the on_accept
- * callback.
- */
-static void
-evio_service_accept_cb(ev_loop * /* loop */, ev_io *watcher,
-		       int /* revents */)
+static inline void
+evio_service_accept(struct evio_service *service)
 {
-	struct evio_service *service = (struct evio_service *) watcher->data;
 	int fd = -1;
-
 	try {
 		struct sockaddr_storage addr;
 		socklen_t addrlen = sizeof(addr);
@@ -182,6 +174,26 @@ evio_service_accept_cb(ev_loop * /* loop */, ev_io *watcher,
 			close(fd);
 		e->log();
 	}
+}
+
+/**
+ * A callback invoked by libev when acceptor socket is ready.
+ * Call on_connect hook, accept the socket, initialize it and pass
+ * to the on_accept callback.
+ */
+static void
+evio_service_connect_cb(ev_loop * /* loop */, ev_io *watcher,
+		       int /* revents */)
+{
+	struct evio_service *service = (struct evio_service *) watcher->data;
+	if (service->on_connect) {
+		/* retry */
+		if (service->on_connect(service) == 0) {
+			ev_feed_event(service->loop, &service->ev, EV_READ);
+			return;
+		}
+	}
+	evio_service_accept(service);
 }
 
 /** Try to bind and listen on the configured port.
@@ -287,6 +299,8 @@ evio_service_timer_cb(ev_loop *loop, ev_timer *watcher, int /* revents */)
 void
 evio_service_init(ev_loop *loop,
 		  struct evio_service *service, const char *name,
+		  int (*on_connect)(struct evio_service *),
+		  void *on_connect_param,
 		  void (*on_accept)(struct evio_service *, int,
 				    struct sockaddr *, socklen_t),
 		  void *on_accept_param)
@@ -296,13 +310,15 @@ evio_service_init(ev_loop *loop,
 
 	service->loop = loop;
 
+	service->on_connect = on_connect;
+	service->on_connect_param = on_connect_param;
 	service->on_accept = on_accept;
 	service->on_accept_param = on_accept_param;
 	/*
 	 * Initialize libev objects to be able to detect if they
 	 * are active or not in evio_service_stop().
 	 */
-	ev_init(&service->ev, evio_service_accept_cb);
+	ev_init(&service->ev, evio_service_connect_cb);
 	ev_init(&service->timer, evio_service_timer_cb);
 	service->timer.data = service->ev.data = service;
 }

@@ -149,7 +149,7 @@ evio_service_name(struct evio_service *service)
 	return service->name;
 }
 
-static inline void
+static inline int
 evio_service_accept(struct evio_service *service)
 {
 	int fd = -1;
@@ -160,7 +160,7 @@ evio_service_accept(struct evio_service *service)
 			(struct sockaddr *)&addr, &addrlen);
 
 		if (fd < 0) /* EAGAIN, EWOULDLOCK, EINTR */
-			return;
+			return 0;
 		/* set common client socket options */
 		evio_setsockopt_client(fd, service->addr.sa_family, SOCK_STREAM);
 		/*
@@ -174,6 +174,7 @@ evio_service_accept(struct evio_service *service)
 			close(fd);
 		e->log();
 	}
+	return 1;
 }
 
 /**
@@ -189,11 +190,21 @@ evio_service_connect_cb(ev_loop * /* loop */, ev_io *watcher,
 	if (service->on_connect) {
 		/* retry */
 		if (service->on_connect(service) == 0) {
-			ev_feed_event(service->loop, &service->ev, EV_READ);
+			ev_idle_start(service->loop, &service->idle);
 			return;
 		}
 	}
 	evio_service_accept(service);
+}
+
+static void
+evio_service_accept_retry_cb(ev_loop * /* loop */, ev_idle *watcher, int /* revents */)
+{
+	struct evio_service *service = (struct evio_service *) watcher->data;
+	if (service->on_connect(service) == 0)
+		return;
+	if (evio_service_accept(service) == 0)
+		ev_idle_stop(service->loop, &service->idle);
 }
 
 /** Try to bind and listen on the configured port.
@@ -320,7 +331,9 @@ evio_service_init(ev_loop *loop,
 	 */
 	ev_init(&service->ev, evio_service_connect_cb);
 	ev_init(&service->timer, evio_service_timer_cb);
+	ev_idle_init(&service->idle, evio_service_accept_retry_cb);
 	service->timer.data = service->ev.data = service;
+	service->idle.data = service;
 }
 
 /**

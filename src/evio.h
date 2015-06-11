@@ -101,6 +101,7 @@ struct evio_service
 	struct ev_timer timer;
 	/** libev io object for the acceptor socket. */
 	struct ev_io ev;
+	struct ev_idle idle;
 	ev_loop *loop;
 };
 
